@@ -20,8 +20,10 @@ package org.apache.hadoop.hbase.client.replication;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -216,6 +218,8 @@ public class TestReplicationAdmin {
     TableName tab2 = TableName.valueOf("t2");
     TableName tab3 = TableName.valueOf("t3");
     TableName tab4 = TableName.valueOf("t4");
+    TableName tab5 = TableName.valueOf("t5");
+    TableName tab6 = TableName.valueOf("t6");
 
     // Add a valid peer
     admin.addPeer(ID_ONE, rpc1, null);
@@ -275,6 +279,34 @@ public class TestReplicationAdmin {
     assertEquals("f1", result.get(tab4).get(0));
     assertEquals("f2", result.get(tab4).get(1));
 
+    // append "table5" => [], then append "table5" => ["f1"]
+    tableCFs.clear();
+    tableCFs.put(tab5, new ArrayList<String>());
+    admin.appendPeerTableCFs(ID_ONE, tableCFs);
+    tableCFs.clear();
+    tableCFs.put(tab5, new ArrayList<String>());
+    tableCFs.get(tab5).add("f1");
+    admin.appendPeerTableCFs(ID_ONE, tableCFs);
+    result = ReplicationSerDeHelper.parseTableCFsFromConfig(admin.getPeerTableCFs(ID_ONE));
+    assertEquals(5, result.size());
+    assertTrue("Should contain t5", result.containsKey(tab5));
+    // null means replication all cfs of tab5
+    assertNull(result.get(tab5));
+
+    // append "table6" => ["f1"], then append "table6" => []
+    tableCFs.clear();
+    tableCFs.put(tab6, new ArrayList<String>());
+    tableCFs.get(tab6).add("f1");
+    admin.appendPeerTableCFs(ID_ONE, tableCFs);
+    tableCFs.clear();
+    tableCFs.put(tab6, new ArrayList<String>());
+    admin.appendPeerTableCFs(ID_ONE, tableCFs);
+    result = ReplicationSerDeHelper.parseTableCFsFromConfig(admin.getPeerTableCFs(ID_ONE));
+    assertEquals(6, result.size());
+    assertTrue("Should contain t6", result.containsKey(tab6));
+    // null means replication all cfs of tab6
+    assertNull(result.get(tab6));
+
     admin.removePeer(ID_ONE);
   }
 
@@ -285,6 +317,7 @@ public class TestReplicationAdmin {
     TableName tab1 = TableName.valueOf("t1");
     TableName tab2 = TableName.valueOf("t2");
     TableName tab3 = TableName.valueOf("t3");
+    TableName tab4 = TableName.valueOf("t4");
     // Add a valid peer
     admin.addPeer(ID_ONE, rpc1, null);
     Map<TableName, List<String>> tableCFs = new HashMap<>();
@@ -345,6 +378,95 @@ public class TestReplicationAdmin {
     tableCFs.get(tab2).add("cf1");
     admin.removePeerTableCFs(ID_ONE, tableCFs);
     assertNull(admin.getPeerTableCFs(ID_ONE));
+
+    tableCFs.clear();
+    tableCFs.put(tab4, new ArrayList<String>());
+    admin.setPeerTableCFs(ID_ONE, tableCFs);
+    admin.removePeerTableCFs(ID_ONE, tableCFs);
+    assertNull(admin.getPeerTableCFs(ID_ONE));
+
+    admin.removePeer(ID_ONE);
+  }
+
+  @Test
+  public void testSetPeerNamespaces() throws Exception {
+    String ns1 = "ns1";
+    String ns2 = "ns2";
+
+    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
+    rpc.setClusterKey(KEY_ONE);
+    admin.addPeer(ID_ONE, rpc);
+    admin.peerAdded(ID_ONE);
+
+    rpc = admin.getPeerConfig(ID_ONE);
+    Set<String> namespaces = new HashSet<String>();
+    namespaces.add(ns1);
+    namespaces.add(ns2);
+    rpc.setNamespaces(namespaces);
+    admin.updatePeerConfig(ID_ONE, rpc);
+    namespaces = admin.getPeerConfig(ID_ONE).getNamespaces();
+    assertEquals(2, namespaces.size());
+    assertTrue(namespaces.contains(ns1));
+    assertTrue(namespaces.contains(ns2));
+
+    rpc = admin.getPeerConfig(ID_ONE);
+    namespaces.clear();
+    namespaces.add(ns1);
+    rpc.setNamespaces(namespaces);
+    admin.updatePeerConfig(ID_ONE, rpc);
+    namespaces = admin.getPeerConfig(ID_ONE).getNamespaces();
+    assertEquals(1, namespaces.size());
+    assertTrue(namespaces.contains(ns1));
+
+    admin.removePeer(ID_ONE);
+  }
+
+  @Test
+  public void testNamespacesAndTableCfsConfigConflict() throws ReplicationException {
+    String ns1 = "ns1";
+    String ns2 = "ns2";
+    TableName tab1 = TableName.valueOf("ns1:tabl");
+    TableName tab2 = TableName.valueOf("ns2:tab2");
+
+    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
+    rpc.setClusterKey(KEY_ONE);
+    admin.addPeer(ID_ONE, rpc);
+    admin.peerAdded(ID_ONE);
+
+    rpc = admin.getPeerConfig(ID_ONE);
+    Set<String> namespaces = new HashSet<String>();
+    namespaces.add(ns1);
+    rpc.setNamespaces(namespaces);
+    admin.updatePeerConfig(ID_ONE, rpc);
+    rpc = admin.getPeerConfig(ID_ONE);
+    Map<TableName, List<String>> tableCfs = new HashMap<>();
+    tableCfs.put(tab1, new ArrayList<String>());
+    rpc.setTableCFsMap(tableCfs);
+    try {
+      admin.updatePeerConfig(ID_ONE, rpc);
+      fail("Should throw ReplicationException, because table " + tab1 + " conflict with namespace "
+          + ns1);
+    } catch (ReplicationException e) {
+      // OK
+    }
+
+    rpc = admin.getPeerConfig(ID_ONE);
+    tableCfs.clear();
+    tableCfs.put(tab2, new ArrayList<String>());
+    rpc.setTableCFsMap(tableCfs);
+    admin.updatePeerConfig(ID_ONE, rpc);
+    rpc = admin.getPeerConfig(ID_ONE);
+    namespaces.clear();
+    namespaces.add(ns2);
+    rpc.setNamespaces(namespaces);
+    try {
+      admin.updatePeerConfig(ID_ONE, rpc);
+      fail("Should throw ReplicationException, because namespace " + ns2 + " conflict with table "
+          + tab2);
+    } catch (ReplicationException e) {
+      // OK
+    }
+
     admin.removePeer(ID_ONE);
   }
 }

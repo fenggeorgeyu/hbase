@@ -21,9 +21,7 @@ package org.apache.hadoop.hbase.master.procedure;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.security.PrivilegedExceptionAction;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -34,48 +32,45 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.DeleteColumnFamilyState;
-import org.apache.hadoop.hbase.util.ByteStringer;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.DeleteColumnFamilyState;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.security.UserGroupInformation;
 
 /**
  * The procedure to delete a column family from an existing table.
  */
 @InterfaceAudience.Private
 public class DeleteColumnFamilyProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, DeleteColumnFamilyState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineTableProcedure<DeleteColumnFamilyState> {
   private static final Log LOG = LogFactory.getLog(DeleteColumnFamilyProcedure.class);
-
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
 
   private HTableDescriptor unmodifiedHTableDescriptor;
   private TableName tableName;
   private byte [] familyName;
   private boolean hasMob;
-  private UserGroupInformation user;
 
   private List<HRegionInfo> regionInfoList;
   private Boolean traceEnabled;
 
   public DeleteColumnFamilyProcedure() {
+    super();
     this.unmodifiedHTableDescriptor = null;
     this.regionInfoList = null;
     this.traceEnabled = null;
   }
 
-  public DeleteColumnFamilyProcedure(
-      final MasterProcedureEnv env,
-      final TableName tableName,
-      final byte[] familyName) throws IOException {
+  public DeleteColumnFamilyProcedure(final MasterProcedureEnv env, final TableName tableName,
+      final byte[] familyName) {
+    this(env, tableName, familyName, null);
+  }
+
+  public DeleteColumnFamilyProcedure(final MasterProcedureEnv env, final TableName tableName,
+      final byte[] familyName, final ProcedurePrepareLatch latch) {
+    super(env, latch);
     this.tableName = tableName;
     this.familyName = familyName;
-    this.user = env.getRequestUser().getUGI();
-    this.setOwner(this.user.getShortUserName());
     this.unmodifiedHTableDescriptor = null;
     this.regionInfoList = null;
     this.traceEnabled = null;
@@ -117,14 +112,11 @@ public class DeleteColumnFamilyProcedure
         throw new UnsupportedOperationException(this + " unhandled state=" + state);
       }
     } catch (IOException e) {
-      if (!isRollbackSupported(state)) {
-        // We reach a state that cannot be rolled back. We just need to keep retry.
-        LOG.warn("Error trying to delete the column family " + getColumnFamilyName()
-          + " from table " + tableName + "(in state=" + state + ")", e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-delete-columnfamily", e);
       } else {
-        LOG.error("Error trying to delete the column family " + getColumnFamilyName()
-          + " from table " + tableName + "(in state=" + state + ")", e);
-        setFailure("master-delete-column-family", e);
+        LOG.warn("Retriable error trying to delete the column family " + getColumnFamilyName() +
+          " from table " + tableName + " (in state=" + state + ")", e);
       }
     }
     return Flow.HAS_MORE_STATE;
@@ -133,40 +125,32 @@ public class DeleteColumnFamilyProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final DeleteColumnFamilyState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
+    if (state == DeleteColumnFamilyState.DELETE_COLUMN_FAMILY_PREPARE ||
+        state == DeleteColumnFamilyState.DELETE_COLUMN_FAMILY_PRE_OPERATION) {
+      // nothing to rollback, pre is just table-state checks.
+      // We can fail if the table does not exist or is not disabled.
+      // TODO: coprocessor rollback semantic is still undefined.
+      return;
     }
-    try {
-      switch (state) {
-      case DELETE_COLUMN_FAMILY_REOPEN_ALL_REGIONS:
-        break; // Nothing to undo.
-      case DELETE_COLUMN_FAMILY_POST_OPERATION:
-        // TODO-MAYBE: call the coprocessor event to undo?
-        break;
-      case DELETE_COLUMN_FAMILY_DELETE_FS_LAYOUT:
-        // Once we reach to this state - we could NOT rollback - as it is tricky to undelete
-        // the deleted files. We are not suppose to reach here, throw exception so that we know
-        // there is a code bug to investigate.
-        throw new UnsupportedOperationException(this + " rollback of state=" + state
-            + " is unsupported.");
-      case DELETE_COLUMN_FAMILY_UPDATE_TABLE_DESCRIPTOR:
-        restoreTableDescriptor(env);
-        break;
+
+    // The procedure doesn't have a rollback. The execution will succeed, at some point.
+    throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final DeleteColumnFamilyState state) {
+    switch (state) {
       case DELETE_COLUMN_FAMILY_PRE_OPERATION:
-        // TODO-MAYBE: call the coprocessor event to undo?
-        break;
       case DELETE_COLUMN_FAMILY_PREPARE:
-        break; // nothing to do
+        return true;
       default:
-        throw new UnsupportedOperationException(this + " unhandled state=" + state);
-      }
-    } catch (IOException e) {
-      // This will be retried. Unless there is a bug in the code,
-      // this should be just a "temporary error" (e.g. network down)
-      LOG.warn("Failed rollback attempt step " + state + " for deleting the column family"
-          + getColumnFamilyName() + " to the table " + tableName, e);
-      throw e;
+        return false;
     }
+  }
+
+  @Override
+  protected void completionCleanup(final MasterProcedureEnv env) {
+    releaseSyncLatch();
   }
 
   @Override
@@ -185,40 +169,14 @@ public class DeleteColumnFamilyProcedure
   }
 
   @Override
-  protected void setNextState(DeleteColumnFamilyState state) {
-    if (aborted.get() && isRollbackSupported(state)) {
-      setAbortFailure("delete-columnfamily", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
-  }
-
-  @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, tableName);
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, tableName);
-  }
-
-  @Override
   public void serializeStateData(final OutputStream stream) throws IOException {
     super.serializeStateData(stream);
 
     MasterProcedureProtos.DeleteColumnFamilyStateData.Builder deleteCFMsg =
         MasterProcedureProtos.DeleteColumnFamilyStateData.newBuilder()
-            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(user))
+            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
             .setTableName(ProtobufUtil.toProtoTableName(tableName))
-            .setColumnfamilyName(ByteStringer.wrap(familyName));
+            .setColumnfamilyName(UnsafeByteOperations.unsafeWrap(familyName));
     if (unmodifiedHTableDescriptor != null) {
       deleteCFMsg
           .setUnmodifiedTableSchema(ProtobufUtil.convertToTableSchema(unmodifiedHTableDescriptor));
@@ -232,7 +190,7 @@ public class DeleteColumnFamilyProcedure
     super.deserializeStateData(stream);
     MasterProcedureProtos.DeleteColumnFamilyStateData deleteCFMsg =
         MasterProcedureProtos.DeleteColumnFamilyStateData.parseDelimitedFrom(stream);
-    user = MasterProcedureUtil.toUserInfo(deleteCFMsg.getUserInfo());
+    setUser(MasterProcedureUtil.toUserInfo(deleteCFMsg.getUserInfo()));
     tableName = ProtobufUtil.toTableName(deleteCFMsg.getTableName());
     familyName = deleteCFMsg.getColumnfamilyName().toByteArray();
 
@@ -272,7 +230,7 @@ public class DeleteColumnFamilyProcedure
    */
   private void prepareDelete(final MasterProcedureEnv env) throws IOException {
     // Checks whether the table is allowed to be modified.
-    MasterDDLOperationHelper.checkTableModifiable(env, tableName);
+    checkTableModifiable(env);
 
     // In order to update the descriptor, we need to retrieve the old descriptor for comparison.
     unmodifiedHTableDescriptor = env.getMasterServices().getTableDescriptors().get(tableName);
@@ -403,39 +361,17 @@ public class DeleteColumnFamilyProcedure
       final DeleteColumnFamilyState state) throws IOException, InterruptedException {
     final MasterCoprocessorHost cpHost = env.getMasterCoprocessorHost();
     if (cpHost != null) {
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          switch (state) {
-          case DELETE_COLUMN_FAMILY_PRE_OPERATION:
-            cpHost.preDeleteColumnFamilyAction(tableName, familyName);
-            break;
-          case DELETE_COLUMN_FAMILY_POST_OPERATION:
-            cpHost.postCompletedDeleteColumnFamilyAction(tableName, familyName);
-            break;
-          default:
-            throw new UnsupportedOperationException(this + " unhandled state=" + state);
-          }
-          return null;
-        }
-      });
+      switch (state) {
+        case DELETE_COLUMN_FAMILY_PRE_OPERATION:
+          cpHost.preDeleteColumnFamilyAction(tableName, familyName, getUser());
+          break;
+        case DELETE_COLUMN_FAMILY_POST_OPERATION:
+          cpHost.postCompletedDeleteColumnFamilyAction(tableName, familyName, getUser());
+          break;
+        default:
+          throw new UnsupportedOperationException(this + " unhandled state=" + state);
+      }
     }
-  }
-
-  /*
-   * Check whether we are in the state that can be rollback
-   */
-  private boolean isRollbackSupported(final DeleteColumnFamilyState state) {
-    switch (state) {
-    case DELETE_COLUMN_FAMILY_REOPEN_ALL_REGIONS:
-    case DELETE_COLUMN_FAMILY_POST_OPERATION:
-    case DELETE_COLUMN_FAMILY_DELETE_FS_LAYOUT:
-        // It is not safe to rollback if we reach to these states.
-        return false;
-      default:
-        break;
-    }
-    return true;
   }
 
   private List<HRegionInfo> getRegionInfoList(final MasterProcedureEnv env) throws IOException {

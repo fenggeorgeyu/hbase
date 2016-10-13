@@ -19,6 +19,7 @@
 package org.apache.hadoop.hbase.master;
 
 import static org.junit.Assert.*;
+import static org.mockito.Matchers.any;
 
 import java.io.IOException;
 import java.io.StringWriter;
@@ -26,8 +27,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -40,6 +39,7 @@ import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.hbase.regionserver.MetricsRegionServer;
 import org.apache.hadoop.hbase.regionserver.MetricsRegionServerWrapperStub;
@@ -99,6 +99,7 @@ public class TestMasterStatusServlet {
 
     // Fake ZKW
     ZooKeeperWatcher zkw = Mockito.mock(ZooKeeperWatcher.class);
+    Mockito.doReturn(new ZNodePaths(conf)).when(zkw).getZNodePaths();
     Mockito.doReturn("fakequorum").when(zkw).getQuorum();
     Mockito.doReturn(zkw).when(master).getZooKeeper();
 

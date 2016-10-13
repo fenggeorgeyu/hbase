@@ -17,9 +17,9 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import com.google.protobuf.BlockingRpcChannel;
-import com.google.protobuf.RpcChannel;
-import io.netty.util.concurrent.EventExecutor;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.BlockingRpcChannel;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcChannel;
+
 import java.io.Closeable;
 import java.io.IOException;
 
@@ -30,7 +30,8 @@ import org.apache.hadoop.hbase.security.User;
 /**
  * Interface for RpcClient implementations so ConnectionManager can handle it.
  */
-@InterfaceAudience.Private public interface RpcClient extends Closeable {
+@InterfaceAudience.Private
+public interface RpcClient extends Closeable {
   String FAILED_SERVER_EXPIRY_KEY = "hbase.ipc.client.failed.servers.expiry";
   int FAILED_SERVER_EXPIRY_DEFAULT = 2000;
   String IDLE_TIME = "hbase.ipc.client.connection.minIdleTimeBeforeClose";
@@ -70,18 +71,6 @@ import org.apache.hadoop.hbase.security.User;
       throws IOException;
 
   /**
-   * Create or fetch AsyncRpcChannel
-   * @param serviceName to connect to
-   * @param sn ServerName of the channel to create
-   * @param user for the service
-   * @return An async RPC channel fitting given parameters
-   * @throws FailedServerException if server failed
-   * @throws StoppedRpcClientException if the RPC client has stopped
-   */
-  AsyncRpcChannel createRpcChannel(String serviceName, ServerName sn, User user)
-      throws StoppedRpcClientException, FailedServerException;
-
-  /**
    * Creates a "channel" that can be used by a protobuf service.  Useful setting up
    * protobuf stubs.
    *
@@ -91,7 +80,8 @@ import org.apache.hadoop.hbase.security.User;
    *
    * @return A rpc channel that goes via this rpc client instance.
    */
-  RpcChannel createProtobufRpcChannel(final ServerName sn, final User user, int rpcTimeout);
+  RpcChannel createRpcChannel(final ServerName sn, final User user, int rpcTimeout)
+      throws IOException;
 
   /**
    * Interrupt the connections to the given server. This should be called if the server
@@ -116,10 +106,4 @@ import org.apache.hadoop.hbase.security.User;
    *         supports cell blocks.
    */
   boolean hasCellBlockSupport();
-
-  /**
-   * Get an event loop to operate on
-   * @return EventLoop
-   */
-  EventExecutor getEventExecutor();
 }

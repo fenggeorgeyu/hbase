@@ -34,7 +34,7 @@ import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.mob.MobUtils;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
 import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -58,8 +58,8 @@ public class DisabledTableSnapshotHandler extends TakeSnapshotHandler {
    * @param masterServices master services provider
    */
   public DisabledTableSnapshotHandler(SnapshotDescription snapshot,
-      final MasterServices masterServices) {
-    super(snapshot, masterServices);
+      final MasterServices masterServices, final SnapshotManager snapshotManager) {
+    super(snapshot, masterServices, snapshotManager);
   }
 
   @Override

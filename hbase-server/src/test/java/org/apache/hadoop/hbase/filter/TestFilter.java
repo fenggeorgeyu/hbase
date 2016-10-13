@@ -315,6 +315,7 @@ public class TestFilter {
     verifyScan(s, expectedRows, expectedKeys);
   }
 
+  @Test
   public void testPrefixFilterWithReverseScan() throws Exception {
     // Grab rows from group one (half of total)
     long expectedRows = this.numRows / 2;
@@ -412,6 +413,7 @@ public class TestFilter {
 
   }
 
+  @Test
   public void testPageFilterWithReverseScan() throws Exception {
     // KVs in first 6 rows
     KeyValue[] expectedKVs = {
@@ -491,6 +493,7 @@ public class TestFilter {
     verifyScan(s, expectedRows, expectedKeys);
   }
 
+  @Test
   public void testWhileMatchFilterWithFilterRowWithReverseScan()
       throws Exception {
     final int pageSize = 4;
@@ -520,6 +523,7 @@ public class TestFilter {
         pageSize, scannerCounter);
   }
 
+  @Test
   public void testWhileMatchFilterWithFilterRowKeyWithReverseScan()
       throws Exception {
     Scan s = new Scan();
@@ -1656,7 +1660,7 @@ public class TestFilter {
     int i = 0;
     for (boolean done = true; done; i++) {
       done = scanner.next(results);
-      Arrays.sort(results.toArray(new KeyValue[results.size()]),
+      Arrays.sort(results.toArray(new Cell[results.size()]),
           CellComparator.COMPARATOR);
       LOG.info("counter=" + i + ", " + results);
       if (results.isEmpty()) break;
@@ -1678,7 +1682,7 @@ public class TestFilter {
     int i = 0;
     for (boolean done = true; done; i++) {
       done = scanner.next(results);
-      Arrays.sort(results.toArray(new KeyValue[results.size()]),
+      Arrays.sort(results.toArray(new Cell[results.size()]),
           CellComparator.COMPARATOR);
       LOG.info("counter=" + i + ", " + results);
       if(results.isEmpty()) break;
@@ -1700,7 +1704,7 @@ public class TestFilter {
     int idx = 0;
     for (boolean done = true; done; row++) {
       done = scanner.next(results);
-      Arrays.sort(results.toArray(new KeyValue[results.size()]),
+      Arrays.sort(results.toArray(new Cell[results.size()]),
           CellComparator.COMPARATOR);
       if(results.isEmpty()) break;
       assertTrue("Scanned too many keys! Only expected " + kvs.length +
@@ -1731,7 +1735,7 @@ public class TestFilter {
     int idx = 0;
     for (boolean more = true; more; row++) {
       more = scanner.next(results);
-      Arrays.sort(results.toArray(new KeyValue[results.size()]),
+      Arrays.sort(results.toArray(new Cell[results.size()]),
           CellComparator.COMPARATOR);
       if(results.isEmpty()) break;
       assertTrue("Scanned too many keys! Only expected " + kvs.length +
@@ -1766,6 +1770,7 @@ public class TestFilter {
         kvs.length, idx);
   }
 
+  @Test
   public void testColumnPaginationFilterColumnOffset() throws Exception {
     KeyValue [] expectedKVs = {
       // testRowOne-0

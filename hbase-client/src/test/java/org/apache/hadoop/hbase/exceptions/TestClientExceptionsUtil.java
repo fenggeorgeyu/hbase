@@ -18,14 +18,18 @@
  */
 package org.apache.hadoop.hbase.exceptions;
 
-import com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.testclassification.ClientTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 
 import java.io.IOException;
 
 import static org.junit.Assert.*;
 
 @SuppressWarnings("ThrowableInstanceNeverThrown")
+@Category({ SmallTests.class, ClientTests.class })
 public class TestClientExceptionsUtil {
 
   @Test

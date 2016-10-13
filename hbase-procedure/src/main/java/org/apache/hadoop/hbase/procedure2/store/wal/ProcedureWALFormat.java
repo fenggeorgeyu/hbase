@@ -18,13 +18,15 @@
 
 package org.apache.hadoop.hbase.procedure2.store.wal;
 
-import com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Iterator;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
@@ -34,9 +36,9 @@ import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore.ProcedureLoader;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStoreTracker;
 import org.apache.hadoop.hbase.procedure2.util.ByteSlot;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureWALEntry;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureWALHeader;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureWALTrailer;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureWALEntry;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureWALHeader;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureWALTrailer;
 
 /**
  * Helper class that contains the WAL serialization utils.
@@ -44,6 +46,8 @@ import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureWALTr
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public final class ProcedureWALFormat {
+  private static final Log LOG = LogFactory.getLog(ProcedureWALFormat.class);
+
   static final byte LOG_TYPE_STREAM = 0;
   static final byte LOG_TYPE_COMPACTED = 1;
   static final byte LOG_TYPE_MAX_VALID = 1;
@@ -72,19 +76,21 @@ public final class ProcedureWALFormat {
 
   public static void load(final Iterator<ProcedureWALFile> logs,
       final ProcedureStoreTracker tracker, final Loader loader) throws IOException {
-    ProcedureWALFormatReader reader = new ProcedureWALFormatReader(tracker);
+    final ProcedureWALFormatReader reader = new ProcedureWALFormatReader(tracker, loader);
     tracker.setKeepDeletes(true);
     try {
+      // Ignore the last log which is current active log.
       while (logs.hasNext()) {
         ProcedureWALFile log = logs.next();
         log.open();
         try {
-          reader.read(log, loader);
+          reader.read(log);
         } finally {
           log.close();
         }
       }
-      reader.finalize(loader);
+      reader.finish();
+
       // The tracker is now updated with all the procedures read from the logs
       tracker.setPartialFlag(false);
       tracker.resetUpdates();
@@ -123,7 +129,7 @@ public final class ProcedureWALFormat {
       .build().writeDelimitedTo(stream);
 
     // Write Tracker
-    tracker.writeTo(stream);
+    tracker.toProto().writeDelimitedTo(stream);
 
     stream.write(TRAILER_VERSION);
     StreamUtils.writeLong(stream, TRAILER_MAGIC);

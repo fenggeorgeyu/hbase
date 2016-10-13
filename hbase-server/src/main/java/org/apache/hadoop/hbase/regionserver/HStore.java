@@ -46,6 +46,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.commons.logging.Log;
@@ -79,13 +80,14 @@ import org.apache.hadoop.hbase.io.hfile.HFileDataBlockEncoderImpl;
 import org.apache.hadoop.hbase.io.hfile.HFileScanner;
 import org.apache.hadoop.hbase.io.hfile.InvalidHFileException;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.CompactionDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.CompactionDescriptor;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionProgress;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
 import org.apache.hadoop.hbase.regionserver.compactions.DefaultCompactor;
 import org.apache.hadoop.hbase.regionserver.compactions.OffPeakHours;
+import org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
 import org.apache.hadoop.hbase.security.EncryptionUtil;
@@ -146,6 +148,19 @@ public class HStore implements Store {
    *   - completing a compaction
    */
   final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+  /**
+   * Lock specific to archiving compacted store files.  This avoids races around
+   * the combination of retrieving the list of compacted files and moving them to
+   * the archive directory.  Since this is usually a background process (other than
+   * on close), we don't want to handle this with the store write lock, which would
+   * block readers and degrade performance.
+   *
+   * Locked by:
+   *   - CompactedHFilesDispatchHandler via closeAndArchiveCompactedFiles()
+   *   - close()
+   */
+  final ReentrantLock archiveLock = new ReentrantLock();
+
   private final boolean verifyBulkLoads;
 
   private ScanInfo scanInfo;
@@ -634,6 +649,16 @@ public class HStore implements Store {
   }
 
   @Override
+  public long add(final Iterable<Cell> cells) {
+    lock.readLock().lock();
+    try {
+      return memstore.add(cells);
+    } finally {
+      lock.readLock().unlock();
+    }
+  }
+
+  @Override
   public long timeOfOldestEdit() {
     return memstore.timeOfOldestEdit();
   }
@@ -783,6 +808,7 @@ public class HStore implements Store {
 
   @Override
   public ImmutableCollection<StoreFile> close() throws IOException {
+    this.archiveLock.lock();
     this.lock.writeLock().lock();
     try {
       // Clear so metrics doesn't find them.
@@ -838,6 +864,7 @@ public class HStore implements Store {
       return result;
     } finally {
       this.lock.writeLock().unlock();
+      this.archiveLock.unlock();
     }
   }
 
@@ -970,6 +997,8 @@ public class HStore implements Store {
    * @param includesTag - includesTag or not
    * @return Writer for a new StoreFile in the tmp dir.
    */
+  // TODO : allow the Writer factory to create Writers of ShipperListener type only in case of
+  // compaction
   @Override
   public StoreFileWriter createWriterInTmp(long maxKeyCount, Compression.Algorithm compression,
       boolean isCompaction, boolean includeMVCCReadpoint, boolean includesTag,
@@ -1284,23 +1313,7 @@ public class HStore implements Store {
       final StoreFile sf = moveFileIntoPlace(newFile);
       if (this.getCoprocessorHost() != null) {
         final Store thisStore = this;
-        if (user == null) {
-          getCoprocessorHost().postCompact(thisStore, sf, cr);
-        } else {
-          try {
-            user.getUGI().doAs(new PrivilegedExceptionAction<Void>() {
-              @Override
-              public Void run() throws Exception {
-                getCoprocessorHost().postCompact(thisStore, sf, cr);
-                return null;
-              }
-            });
-          } catch (InterruptedException ie) {
-            InterruptedIOException iioe = new InterruptedIOException();
-            iioe.initCause(ie);
-            throw iioe;
-          }
-        }
+        getCoprocessorHost().postCompact(thisStore, sf, cr, user);
       }
       assert sf != null;
       sfs.add(sf);
@@ -1507,7 +1520,7 @@ public class HStore implements Store {
         // Move the compaction into place.
         StoreFile sf = moveFileIntoPlace(newFile);
         if (this.getCoprocessorHost() != null) {
-          this.getCoprocessorHost().postCompact(this, sf, null);
+          this.getCoprocessorHost().postCompact(this, sf, null, null);
         }
         replaceStoreFiles(filesToCompact, Lists.newArrayList(sf));
         completeCompaction(filesToCompact);
@@ -1568,29 +1581,12 @@ public class HStore implements Store {
     this.lock.readLock().lock();
     try {
       synchronized (filesCompacting) {
-        final Store thisStore = this;
         // First, see if coprocessor would want to override selection.
         if (this.getCoprocessorHost() != null) {
           final List<StoreFile> candidatesForCoproc = compaction.preSelect(this.filesCompacting);
           boolean override = false;
-          if (user == null) {
-            override = getCoprocessorHost().preCompactSelection(this, candidatesForCoproc,
-              baseRequest);
-          } else {
-            try {
-              override = user.getUGI().doAs(new PrivilegedExceptionAction<Boolean>() {
-                @Override
-                public Boolean run() throws Exception {
-                  return getCoprocessorHost().preCompactSelection(thisStore, candidatesForCoproc,
-                    baseRequest);
-                }
-              });
-            } catch (InterruptedException ie) {
-              InterruptedIOException iioe = new InterruptedIOException();
-              iioe.initCause(ie);
-              throw iioe;
-            }
-          }
+          override = getCoprocessorHost().preCompactSelection(this, candidatesForCoproc,
+              baseRequest, user);
           if (override) {
             // Coprocessor is overriding normal file selection.
             compaction.forceSelect(new CompactionRequest(candidatesForCoproc));
@@ -1618,25 +1614,8 @@ public class HStore implements Store {
           }
         }
         if (this.getCoprocessorHost() != null) {
-          if (user == null) {
-            this.getCoprocessorHost().postCompactSelection(
-              this, ImmutableList.copyOf(compaction.getRequest().getFiles()), baseRequest);
-          } else {
-            try {
-              user.getUGI().doAs(new PrivilegedExceptionAction<Void>() {
-                @Override
-                public Void run() throws Exception {
-                  getCoprocessorHost().postCompactSelection(
-                    thisStore,ImmutableList.copyOf(compaction.getRequest().getFiles()),baseRequest);
-                  return null;
-                }
-              });
-            } catch (InterruptedException ie) {
-              InterruptedIOException iioe = new InterruptedIOException();
-              iioe.initCause(ie);
-              throw iioe;
-            }
-          }
+          this.getCoprocessorHost().postCompactSelection(
+              this, ImmutableList.copyOf(compaction.getRequest().getFiles()), baseRequest, user);
         }
 
         // Selected files; see if we have a compaction with some custom base request.
@@ -1797,35 +1776,6 @@ public class HStore implements Store {
     // Make sure we do not return more than maximum versions for this store.
     int maxVersions = this.family.getMaxVersions();
     return wantedVersions > maxVersions ? maxVersions: wantedVersions;
-  }
-
-  /**
-   * @param cell
-   * @param oldestTimestamp
-   * @return true if the cell is expired
-   */
-  static boolean isCellTTLExpired(final Cell cell, final long oldestTimestamp, final long now) {
-    // Look for a TTL tag first. Use it instead of the family setting if
-    // found. If a cell has multiple TTLs, resolve the conflict by using the
-    // first tag encountered.
-    Iterator<Tag> i = CellUtil.tagsIterator(cell);
-    while (i.hasNext()) {
-      Tag t = i.next();
-      if (TagType.TTL_TAG_TYPE == t.getType()) {
-        // Unlike in schema cell TTLs are stored in milliseconds, no need
-        // to convert
-        long ts = cell.getTimestamp();
-        assert t.getValueLength() == Bytes.SIZEOF_LONG;
-        long ttl = TagUtil.getValueAsLong(t);
-        if (ts + ttl < now) {
-          return true;
-        }
-        // Per cell TTLs cannot extend lifetime beyond family settings, so
-        // fall through to check that
-        break;
-      }
-    }
-    return false;
   }
 
   @Override
@@ -2299,7 +2249,7 @@ public class HStore implements Store {
   }
 
   public static final long FIXED_OVERHEAD =
-      ClassSize.align(ClassSize.OBJECT + (16 * ClassSize.REFERENCE) + (11 * Bytes.SIZEOF_LONG)
+      ClassSize.align(ClassSize.OBJECT + (17 * ClassSize.REFERENCE) + (11 * Bytes.SIZEOF_LONG)
               + (5 * Bytes.SIZEOF_INT) + (2 * Bytes.SIZEOF_BOOLEAN));
 
   public static final long DEEP_OVERHEAD = ClassSize.align(FIXED_OVERHEAD
@@ -2423,26 +2373,32 @@ public class HStore implements Store {
   }
 
   @Override
-  public void closeAndArchiveCompactedFiles() throws IOException {
-    lock.readLock().lock();
-    Collection<StoreFile> copyCompactedfiles = null;
+  public synchronized void closeAndArchiveCompactedFiles() throws IOException {
+    // ensure other threads do not attempt to archive the same files on close()
+    archiveLock.lock();
     try {
-      Collection<StoreFile> compactedfiles =
-          this.getStoreEngine().getStoreFileManager().getCompactedfiles();
-      if (compactedfiles != null && compactedfiles.size() != 0) {
-        // Do a copy under read lock
-        copyCompactedfiles = new ArrayList<StoreFile>(compactedfiles);
-      } else {
-        if (LOG.isTraceEnabled()) {
-          LOG.trace("No compacted files to archive");
-          return;
+      lock.readLock().lock();
+      Collection<StoreFile> copyCompactedfiles = null;
+      try {
+        Collection<StoreFile> compactedfiles =
+            this.getStoreEngine().getStoreFileManager().getCompactedfiles();
+        if (compactedfiles != null && compactedfiles.size() != 0) {
+          // Do a copy under read lock
+          copyCompactedfiles = new ArrayList<StoreFile>(compactedfiles);
+        } else {
+          if (LOG.isTraceEnabled()) {
+            LOG.trace("No compacted files to archive");
+            return;
+          }
         }
+      } finally {
+        lock.readLock().unlock();
+      }
+      if (copyCompactedfiles != null && !copyCompactedfiles.isEmpty()) {
+        removeCompactedfiles(copyCompactedfiles);
       }
     } finally {
-      lock.readLock().unlock();
-    }
-    if (copyCompactedfiles != null && !copyCompactedfiles.isEmpty()) {
-      removeCompactedfiles(copyCompactedfiles);
+      archiveLock.unlock();
     }
   }
 

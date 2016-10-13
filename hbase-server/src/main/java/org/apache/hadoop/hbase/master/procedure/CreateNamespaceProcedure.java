@@ -21,20 +21,17 @@ package org.apache.hadoop.hbase.master.procedure;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceExistException;
-import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.master.MasterFileSystem;
 import org.apache.hadoop.hbase.master.TableNamespaceManager;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.CreateNamespaceState;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.CreateNamespaceState;
 import org.apache.hadoop.hbase.util.FSUtils;
 
 /**
@@ -42,11 +39,8 @@ import org.apache.hadoop.hbase.util.FSUtils;
  */
 @InterfaceAudience.Private
 public class CreateNamespaceProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, CreateNamespaceState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineNamespaceProcedure<CreateNamespaceState> {
   private static final Log LOG = LogFactory.getLog(CreateNamespaceProcedure.class);
-
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
 
   private NamespaceDescriptor nsDescriptor;
   private Boolean traceEnabled;
@@ -55,12 +49,11 @@ public class CreateNamespaceProcedure
     this.traceEnabled = null;
   }
 
-  public CreateNamespaceProcedure(
-      final MasterProcedureEnv env,
-      final NamespaceDescriptor nsDescriptor) throws IOException {
+  public CreateNamespaceProcedure(final MasterProcedureEnv env,
+      final NamespaceDescriptor nsDescriptor) {
+    super(env);
     this.nsDescriptor = nsDescriptor;
     this.traceEnabled = null;
-    this.setOwner(env.getRequestUser().getUGI().getShortUserName());
   }
 
   @Override
@@ -95,10 +88,12 @@ public class CreateNamespaceProcedure
         throw new UnsupportedOperationException(this + " unhandled state=" + state);
       }
     } catch (IOException e) {
-      LOG.warn("Error trying to create the namespace" + nsDescriptor.getName()
-        + " (in state=" + state + ")", e);
-
-      setFailure("master-create-namespace", e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-create-namespace", e);
+      } else {
+        LOG.warn("Retriable error trying to create namespace=" + nsDescriptor.getName() +
+          " (in state=" + state + ")", e);
+      }
     }
     return Flow.HAS_MORE_STATE;
   }
@@ -106,34 +101,22 @@ public class CreateNamespaceProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final CreateNamespaceState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
+    if (state == CreateNamespaceState.CREATE_NAMESPACE_PREPARE) {
+      // nothing to rollback, pre-create is just state checks.
+      // TODO: coprocessor rollback semantic is still undefined.
+      return;
     }
-    try {
-      switch (state) {
-      case CREATE_NAMESPACE_SET_NAMESPACE_QUOTA:
-        rollbackSetNamespaceQuota(env);
-        break;
-      case CREATE_NAMESPACE_UPDATE_ZK:
-        rollbackZKNamespaceManagerChange(env);
-        break;
-      case CREATE_NAMESPACE_INSERT_INTO_NS_TABLE:
-        rollbackInsertIntoNSTable(env);
-        break;
-      case CREATE_NAMESPACE_CREATE_DIRECTORY:
-        rollbackCreateDirectory(env);
-        break;
+    // The procedure doesn't have a rollback. The execution will succeed, at some point.
+    throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final CreateNamespaceState state) {
+    switch (state) {
       case CREATE_NAMESPACE_PREPARE:
-        break; // nothing to do
+        return true;
       default:
-        throw new UnsupportedOperationException(this + " unhandled state=" + state);
-      }
-    } catch (IOException e) {
-      // This will be retried. Unless there is a bug in the code,
-      // this should be just a "temporary error" (e.g. network down)
-      LOG.warn("Failed rollback attempt step " + state + " for creating the namespace "
-          + nsDescriptor.getName(), e);
-      throw e;
+        return false;
     }
   }
 
@@ -150,21 +133,6 @@ public class CreateNamespaceProcedure
   @Override
   protected CreateNamespaceState getInitialState() {
     return CreateNamespaceState.CREATE_NAMESPACE_PREPARE;
-  }
-
-  @Override
-  protected void setNextState(CreateNamespaceState state) {
-    if (aborted.get()) {
-      setAbortFailure("create-namespace", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
   }
 
   @Override
@@ -186,14 +154,6 @@ public class CreateNamespaceProcedure
     nsDescriptor = ProtobufUtil.toNamespaceDescriptor(createNamespaceMsg.getNamespaceDescriptor());
   }
 
-  @Override
-  public void toStringClassDetails(StringBuilder sb) {
-    sb.append(getClass().getSimpleName());
-    sb.append(" (Namespace=");
-    sb.append(nsDescriptor.getName());
-    sb.append(")");
-  }
-
   private boolean isBootstrapNamespace() {
     return nsDescriptor.equals(NamespaceDescriptor.DEFAULT_NAMESPACE) ||
         nsDescriptor.equals(NamespaceDescriptor.SYSTEM_NAMESPACE);
@@ -213,21 +173,12 @@ public class CreateNamespaceProcedure
   }
 
   @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseNamespaceExclusiveLock(this, getNamespaceName());
-  }
-
-  @Override
-  public TableName getTableName() {
-    return TableName.NAMESPACE_TABLE_NAME;
-  }
-
-  @Override
   public TableOperationType getTableOperationType() {
     return TableOperationType.EDIT;
   }
 
-  private String getNamespaceName() {
+  @Override
+  protected String getNamespaceName() {
     return nsDescriptor.getName();
   }
 
@@ -258,20 +209,6 @@ public class CreateNamespaceProcedure
   }
 
   /**
-   * undo create directory
-   * @param env MasterProcedureEnv
-   * @throws IOException
-   */
-  private void rollbackCreateDirectory(final MasterProcedureEnv env) throws IOException {
-    try {
-      DeleteNamespaceProcedure.deleteDirectory(env, nsDescriptor.getName());
-    } catch (Exception e) {
-      // Ignore exception
-      LOG.debug("Rollback of createDirectory throws exception: " + e);
-    }
-  }
-
-  /**
    * Insert the row into ns table
    * @param env MasterProcedureEnv
    * @param nsDescriptor NamespaceDescriptor
@@ -284,20 +221,6 @@ public class CreateNamespaceProcedure
   }
 
   /**
-   * Undo the insert.
-   * @param env MasterProcedureEnv
-   * @throws IOException
-   */
-  private void rollbackInsertIntoNSTable(final MasterProcedureEnv env) throws IOException {
-    try {
-      DeleteNamespaceProcedure.deleteFromNSTable(env, nsDescriptor.getName());
-    } catch (Exception e) {
-      // Ignore exception
-      LOG.debug("Rollback of insertIntoNSTable throws exception: " + e);
-    }
-  }
-
-  /**
    * Update ZooKeeper.
    * @param env MasterProcedureEnv
    * @param nsDescriptor NamespaceDescriptor
@@ -307,20 +230,6 @@ public class CreateNamespaceProcedure
       final MasterProcedureEnv env,
       final NamespaceDescriptor nsDescriptor) throws IOException {
     getTableNamespaceManager(env).updateZKNamespaceManager(nsDescriptor);
-  }
-
-  /**
-   * rollback ZooKeeper update.
-   * @param env MasterProcedureEnv
-   * @throws IOException
-   */
-  private void rollbackZKNamespaceManagerChange(final MasterProcedureEnv env) throws IOException {
-    try {
-      DeleteNamespaceProcedure.removeFromZKNamespaceManager(env, nsDescriptor.getName());
-    } catch (Exception e) {
-      // Ignore exception
-      LOG.debug("Rollback of updateZKNamespaceManager throws exception: " + e);
-    }
   }
 
   /**

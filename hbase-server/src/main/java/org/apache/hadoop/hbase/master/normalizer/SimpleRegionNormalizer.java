@@ -18,7 +18,10 @@
  */
 package org.apache.hadoop.hbase.master.normalizer;
 
-import com.google.protobuf.ServiceException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -32,12 +35,7 @@ import org.apache.hadoop.hbase.client.MasterSwitchType;
 import org.apache.hadoop.hbase.master.MasterRpcServices;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.normalizer.NormalizationPlan.PlanType;
-import org.apache.hadoop.hbase.protobuf.RequestConverter;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
+import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
 
 /**
  * Simple implementation of region normalizer.
@@ -136,16 +134,18 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       ", number of regions: " + tableRegions.size());
 
     long totalSizeMb = 0;
+    int acutalRegionCnt = 0;
 
     for (int i = 0; i < tableRegions.size(); i++) {
       HRegionInfo hri = tableRegions.get(i);
       long regionSize = getRegionSize(hri);
       if (regionSize > 0) {
+        acutalRegionCnt++;
         totalSizeMb += regionSize;
       }
     }
 
-    double avgRegionSize = totalSizeMb / (double) tableRegions.size();
+    double avgRegionSize = acutalRegionCnt == 0 ? 0 : totalSizeMb / (double) acutalRegionCnt;
 
     LOG.debug("Table " + table + ", total aggregated regions size: " + totalSizeMb);
     LOG.debug("Table " + table + ", average region size: " + avgRegionSize);
@@ -155,14 +155,14 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     try {
       splitEnabled = masterRpcServices.isSplitOrMergeEnabled(null,
         RequestConverter.buildIsSplitOrMergeEnabledRequest(MasterSwitchType.SPLIT)).getEnabled();
-    } catch (ServiceException se) {
-      LOG.debug("Unable to determine whether split is enabled", se);
+    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException e) {
+      LOG.debug("Unable to determine whether split is enabled", e);
     }
     try {
       mergeEnabled = masterRpcServices.isSplitOrMergeEnabled(null,
         RequestConverter.buildIsSplitOrMergeEnabledRequest(MasterSwitchType.MERGE)).getEnabled();
-    } catch (ServiceException se) {
-      LOG.debug("Unable to determine whether split is enabled", se);
+    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException e) {
+      LOG.debug("Unable to determine whether split is enabled", e);
     }
     while (candidateIdx < tableRegions.size()) {
       HRegionInfo hri = tableRegions.get(candidateIdx);

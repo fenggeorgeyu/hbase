@@ -18,10 +18,13 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
+
+import java.io.IOException;
 
 /**
  * A singleton store segment factory.
@@ -36,39 +39,51 @@ public final class SegmentFactory {
 
   private SegmentFactory() {}
   private static SegmentFactory instance = new SegmentFactory();
+
   public static SegmentFactory instance() {
     return instance;
   }
 
+  // create skip-list-based (non-flat) immutable segment from compacting old immutable segments
   public ImmutableSegment createImmutableSegment(final Configuration conf,
-      final CellComparator comparator, long size) {
-    MemStoreLAB memStoreLAB = getMemStoreLAB(conf);
-    MutableSegment segment = generateMutableSegment(conf, comparator, memStoreLAB, size);
+      final CellComparator comparator, MemStoreCompactorIterator iterator) {
+    return new ImmutableSegment(comparator, iterator, getMemStoreLAB(conf));
+  }
+
+  // create new flat immutable segment from compacting old immutable segment
+  public ImmutableSegment createImmutableSegment(final Configuration conf,
+      final CellComparator comparator, MemStoreCompactorIterator iterator, int numOfCells,
+      ImmutableSegment.Type segmentType) throws IOException {
+    Preconditions.checkArgument(segmentType != ImmutableSegment.Type.SKIPLIST_MAP_BASED,
+        "wrong immutable segment type");
+    return new ImmutableSegment(comparator, iterator, getMemStoreLAB(conf), numOfCells,
+        segmentType);
+  }
+
+  // create empty immutable segment
+  public ImmutableSegment createImmutableSegment(CellComparator comparator) {
+    MutableSegment segment = generateMutableSegment(null, comparator, null);
     return createImmutableSegment(segment);
   }
 
-  public ImmutableSegment createImmutableSegment(CellComparator comparator,
-      long size) {
-    MutableSegment segment = generateMutableSegment(null, comparator, null, size);
-    return createImmutableSegment(segment);
-  }
-
+  // create immutable segment from mutable segment
   public ImmutableSegment createImmutableSegment(MutableSegment segment) {
     return new ImmutableSegment(segment);
   }
-  public MutableSegment createMutableSegment(final Configuration conf,
-      CellComparator comparator, long size) {
+
+  // create mutable segment
+  public MutableSegment createMutableSegment(final Configuration conf, CellComparator comparator) {
     MemStoreLAB memStoreLAB = getMemStoreLAB(conf);
-    return generateMutableSegment(conf, comparator, memStoreLAB, size);
+    return generateMutableSegment(conf, comparator, memStoreLAB);
   }
 
   //****** private methods to instantiate concrete store segments **********//
 
-  private MutableSegment generateMutableSegment(
-      final Configuration conf, CellComparator comparator, MemStoreLAB memStoreLAB, long size) {
+  private MutableSegment generateMutableSegment(final Configuration conf, CellComparator comparator,
+      MemStoreLAB memStoreLAB) {
     // TBD use configuration to set type of segment
     CellSet set = new CellSet(comparator);
-    return new MutableSegment(set, comparator, memStoreLAB, size);
+    return new MutableSegment(set, comparator, memStoreLAB);
   }
 
   private MemStoreLAB getMemStoreLAB(Configuration conf) {

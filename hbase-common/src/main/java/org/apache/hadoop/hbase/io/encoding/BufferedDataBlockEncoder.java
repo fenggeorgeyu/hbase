@@ -23,21 +23,16 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 
 import org.apache.hadoop.hbase.ByteBufferedCell;
-import org.apache.hadoop.hbase.ByteBufferedKeyOnlyKeyValue;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.SettableSequenceId;
-import org.apache.hadoop.hbase.Streamable;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.TagCompressionContext;
-import org.apache.hadoop.hbase.io.hfile.BlockType;
-import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.util.LRUDictionary;
 import org.apache.hadoop.hbase.io.util.StreamUtils;
 import org.apache.hadoop.hbase.nio.ByteBuff;
@@ -51,7 +46,7 @@ import org.apache.hadoop.io.WritableUtils;
  * Base class for all data block encoders that use a buffer.
  */
 @InterfaceAudience.Private
-abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
+abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
   /**
    * TODO: This datablockencoder is dealing in internals of hfileblocks. Purge reference to HFBs
    */
@@ -121,8 +116,8 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
     protected boolean uncompressTags = true;
 
     /** We need to store a copy of the key. */
-    protected byte[] keyBuffer = new byte[INITIAL_KEY_BUFFER_SIZE];
-    protected byte[] tagsBuffer = new byte[INITIAL_KEY_BUFFER_SIZE];
+    protected byte[] keyBuffer = HConstants.EMPTY_BYTE_ARRAY;
+    protected byte[] tagsBuffer = HConstants.EMPTY_BYTE_ARRAY;
 
     protected long memstoreTS;
     protected int nextKvOffset;
@@ -151,11 +146,8 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
 
     protected void ensureSpaceForKey() {
       if (keyLength > keyBuffer.length) {
-        // rare case, but we need to handle arbitrary length of key
-        int newKeyBufferLength = Math.max(keyBuffer.length, 1) * 2;
-        while (keyLength > newKeyBufferLength) {
-          newKeyBufferLength *= 2;
-        }
+        int newKeyBufferLength = Integer.highestOneBit(Math.max(
+            INITIAL_KEY_BUFFER_SIZE, keyLength) - 1) << 1;
         byte[] newKeyBuffer = new byte[newKeyBufferLength];
         System.arraycopy(keyBuffer, 0, newKeyBuffer, 0, keyBuffer.length);
         keyBuffer = newKeyBuffer;
@@ -164,11 +156,8 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
 
     protected void ensureSpaceForTags() {
       if (tagsLength > tagsBuffer.length) {
-        // rare case, but we need to handle arbitrary length of tags
-        int newTagsBufferLength = Math.max(tagsBuffer.length, 1) * 2;
-        while (tagsLength > newTagsBufferLength) {
-          newTagsBufferLength *= 2;
-        }
+        int newTagsBufferLength = Integer.highestOneBit(Math.max(
+            INITIAL_KEY_BUFFER_SIZE, tagsLength) - 1) << 1;
         byte[] newTagsBuffer = new byte[newTagsBufferLength];
         System.arraycopy(tagsBuffer, 0, newTagsBuffer, 0, tagsBuffer.length);
         tagsBuffer = newTagsBuffer;
@@ -289,8 +278,7 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
    */
   // We return this as a Cell to the upper layers of read flow and might try setting a new SeqId
   // there. So this has to be an instance of SettableSequenceId.
-  protected static class OnheapDecodedCell implements Cell, HeapSize, SettableSequenceId,
-      Streamable {
+  protected static class OnheapDecodedCell implements ExtendedCell {
     private static final long FIXED_OVERHEAD = ClassSize.align(ClassSize.OBJECT
         + (3 * ClassSize.REFERENCE) + (2 * Bytes.SIZEOF_LONG) + (7 * Bytes.SIZEOF_INT)
         + (Bytes.SIZEOF_SHORT) + (2 * Bytes.SIZEOF_BYTE) + (3 * ClassSize.ARRAY));
@@ -438,22 +426,15 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
     }
 
     @Override
-    public int write(OutputStream out) throws IOException {
-      return write(out, true);
-    }
-
-    @Override
     public int write(OutputStream out, boolean withTags) throws IOException {
-      int lenToWrite = KeyValueUtil.length(rowLength, familyLength, qualifierLength, valueLength,
-          tagsLength, withTags);
-      ByteBufferUtils.putInt(out, lenToWrite);
+      int lenToWrite = getSerializedSize(withTags);
       ByteBufferUtils.putInt(out, keyOnlyBuffer.length);
       ByteBufferUtils.putInt(out, valueLength);
       // Write key
       out.write(keyOnlyBuffer);
       // Write value
       out.write(this.valueBuffer, this.valueOffset, this.valueLength);
-      if (withTags) {
+      if (withTags && this.tagsLength > 0) {
         // 2 bytes tags length followed by tags bytes
         // tags length is serialized with 2 bytes only(short way) even if the type is int.
         // As this is non -ve numbers, we save the sign bit. See HBASE-11437
@@ -461,12 +442,35 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
         out.write((byte) (0xff & this.tagsLength));
         out.write(this.tagsBuffer, this.tagsOffset, this.tagsLength);
       }
-      return lenToWrite + Bytes.SIZEOF_INT;
+      return lenToWrite;
+    }
+
+    @Override
+    public int getSerializedSize(boolean withTags) {
+      return KeyValueUtil.length(rowLength, familyLength, qualifierLength, valueLength, tagsLength,
+          withTags);
+    }
+
+    @Override
+    public void write(byte[] buf, int offset) {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setTimestamp(long ts) throws IOException {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setTimestamp(byte[] ts, int tsOffset) throws IOException {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
     }
   }
 
-  protected static class OffheapDecodedCell extends ByteBufferedCell implements HeapSize,
-      SettableSequenceId, Streamable {
+  protected static class OffheapDecodedCell extends ByteBufferedCell implements ExtendedCell {
     private static final long FIXED_OVERHEAD = ClassSize.align(ClassSize.OBJECT
         + (3 * ClassSize.REFERENCE) + (2 * Bytes.SIZEOF_LONG) + (7 * Bytes.SIZEOF_INT)
         + (Bytes.SIZEOF_SHORT) + (2 * Bytes.SIZEOF_BYTE) + (3 * ClassSize.BYTE_BUFFER));
@@ -661,22 +665,15 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
     }
 
     @Override
-    public int write(OutputStream out) throws IOException {
-      return write(out, true);
-    }
-
-    @Override
     public int write(OutputStream out, boolean withTags) throws IOException {
-      int lenToWrite = KeyValueUtil.length(rowLength, familyLength, qualifierLength, valueLength,
-          tagsLength, withTags);
-      ByteBufferUtils.putInt(out, lenToWrite);
+      int lenToWrite = getSerializedSize(withTags);
       ByteBufferUtils.putInt(out, keyBuffer.capacity());
       ByteBufferUtils.putInt(out, valueLength);
       // Write key
       out.write(keyBuffer.array());
       // Write value
       ByteBufferUtils.copyBufferToStream(out, this.valueBuffer, this.valueOffset, this.valueLength);
-      if (withTags) {
+      if (withTags && this.tagsLength > 0) {
         // 2 bytes tags length followed by tags bytes
         // tags length is serialized with 2 bytes only(short way) even if the type is int.
         // As this is non -ve numbers, we save the sign bit. See HBASE-11437
@@ -684,15 +681,36 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
         out.write((byte) (0xff & this.tagsLength));
         ByteBufferUtils.copyBufferToStream(out, this.tagsBuffer, this.tagsOffset, this.tagsLength);
       }
-      return lenToWrite + Bytes.SIZEOF_INT;
+      return lenToWrite;
+    }
+
+    @Override
+    public int getSerializedSize(boolean withTags) {
+      return KeyValueUtil.length(rowLength, familyLength, qualifierLength, valueLength, tagsLength,
+          withTags);
+    }
+
+    @Override
+    public void setTimestamp(long ts) throws IOException {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setTimestamp(byte[] ts, int tsOffset) throws IOException {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void write(byte[] buf, int offset) {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
     }
   }
 
-  protected abstract static class
-      BufferedEncodedSeeker<STATE extends SeekerState>
-      implements EncodedSeeker {
-    protected HFileBlockDecodingContext decodingCtx;
-    protected final CellComparator comparator;
+  protected abstract static class BufferedEncodedSeeker<STATE extends SeekerState>
+      extends AbstractEncodedSeeker {
     protected ByteBuff currentBuffer;
     protected TagCompressionContext tagCompressionContext = null;
     protected  KeyValue.KeyOnlyKeyValue keyOnlyKV = new KeyValue.KeyOnlyKeyValue();
@@ -703,8 +721,7 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
 
     public BufferedEncodedSeeker(CellComparator comparator,
         HFileBlockDecodingContext decodingCtx) {
-      this.comparator = comparator;
-      this.decodingCtx = decodingCtx;
+      super(comparator, decodingCtx);
       if (decodingCtx.getHFileContext().isCompressTags()) {
         try {
           tagCompressionContext = new TagCompressionContext(LRUDictionary.class, Byte.MAX_VALUE);
@@ -714,14 +731,6 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
       }
       current = createSeekerState(); // always valid
       previous = createSeekerState(); // may not be valid
-    }
-
-    protected boolean includesMvcc() {
-      return this.decodingCtx.getHFileContext().isIncludesMvcc();
-    }
-
-    protected boolean includesTags() {
-      return this.decodingCtx.getHFileContext().isIncludesTags();
     }
 
     @Override
@@ -1055,17 +1064,6 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
     }
   }
 
-  @Override
-  public HFileBlockEncodingContext newDataBlockEncodingContext(DataBlockEncoding encoding,
-      byte[] header, HFileContext meta) {
-    return new HFileBlockDefaultEncodingContext(encoding, header, meta);
-  }
-
-  @Override
-  public HFileBlockDecodingContext newDataBlockDecodingContext(HFileContext meta) {
-    return new HFileBlockDefaultDecodingContext(meta);
-  }
-
   protected abstract ByteBuffer internalDecodeKeyValues(DataInputStream source,
       int allocateHeaderLength, int skipLastBytes, HFileBlockDefaultDecodingContext decodingCtx)
       throws IOException;
@@ -1145,19 +1143,7 @@ abstract class BufferedDataBlockEncoder implements DataBlockEncoder {
     Bytes.putInt(uncompressedBytesWithHeader,
       HConstants.HFILEBLOCK_HEADER_SIZE + DataBlockEncoding.ID_SIZE, state.unencodedDataSizeWritten
         );
-    if (encodingCtx.getDataBlockEncoding() != DataBlockEncoding.NONE) {
-      encodingCtx.postEncoding(BlockType.ENCODED_DATA);
-    } else {
-      encodingCtx.postEncoding(BlockType.DATA);
-    }
+    postEncoding(encodingCtx);
   }
 
-  protected Cell createFirstKeyCell(ByteBuffer key, int keyLength) {
-    if (key.hasArray()) {
-      return new KeyValue.KeyOnlyKeyValue(key.array(), key.arrayOffset() + key.position(),
-          keyLength);
-    } else {
-      return new ByteBufferedKeyOnlyKeyValue(key, key.position(), keyLength);
-    }
-  }
 }

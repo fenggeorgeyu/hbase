@@ -86,12 +86,12 @@ import org.apache.hadoop.hbase.exceptions.OperationConflictException;
 import org.apache.hadoop.hbase.exceptions.RegionInRecoveryException;
 import org.apache.hadoop.hbase.ipc.ServerNotRunningYetException;
 import org.apache.hadoop.hbase.master.SplitLogManager.TaskBatch;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -459,7 +459,7 @@ public class TestDistributedLogSplitting {
       @Override
       public boolean evaluate() throws Exception {
         List<String> recoveringRegions = zkw.getRecoverableZooKeeper().getChildren(
-            zkw.recoveringRegionsZNode, false);
+            zkw.znodePaths.recoveringRegionsZNode, false);
         return (recoveringRegions != null && recoveringRegions.size() == 0);
       }
     });
@@ -566,7 +566,7 @@ public class TestDistributedLogSplitting {
         @Override
         public boolean evaluate() throws Exception {
           List<String> recoveringRegions = zkw.getRecoverableZooKeeper().getChildren(
-              zkw.recoveringRegionsZNode, false);
+              zkw.znodePaths.recoveringRegionsZNode, false);
           boolean done = recoveringRegions != null && recoveringRegions.size() == 0;
           if (!done) {
             LOG.info("Recovering regions: " + recoveringRegions);
@@ -658,7 +658,7 @@ public class TestDistributedLogSplitting {
         @Override
         public boolean evaluate() throws Exception {
           List<String> recoveringRegions = zkw.getRecoverableZooKeeper().getChildren(
-              zkw.recoveringRegionsZNode, false);
+              zkw.znodePaths.recoveringRegionsZNode, false);
           return (recoveringRegions != null && recoveringRegions.size() == 0);
         }
       });
@@ -702,7 +702,7 @@ public class TestDistributedLogSplitting {
       slm.markRegionsRecovering(secondFailedServer, regionSet);
 
       List<String> recoveringRegions = ZKUtil.listChildrenNoWatch(zkw,
-          ZKUtil.joinZNode(zkw.recoveringRegionsZNode, region.getEncodedName()));
+          ZKUtil.joinZNode(zkw.znodePaths.recoveringRegionsZNode, region.getEncodedName()));
 
       assertEquals(recoveringRegions.size(), 2);
 
@@ -859,7 +859,7 @@ public class TestDistributedLogSplitting {
         @Override
         public boolean evaluate() throws Exception {
           List<String> recoveringRegions = zkw.getRecoverableZooKeeper().getChildren(
-              zkw.recoveringRegionsZNode, false);
+              zkw.znodePaths.recoveringRegionsZNode, false);
           ServerManager serverManager = master.getServerManager();
           return (!serverManager.areDeadServersInProgress() &&
               recoveringRegions != null && recoveringRegions.size() == 0);
@@ -1104,7 +1104,7 @@ public class TestDistributedLogSplitting {
         @Override
         public boolean evaluate() throws Exception {
           List<String> recoveringRegions = zkw.getRecoverableZooKeeper().getChildren(
-              zkw.recoveringRegionsZNode, false);
+              zkw.znodePaths.recoveringRegionsZNode, false);
           return (recoveringRegions != null && recoveringRegions.size() == 0);
         }
       });
@@ -1210,7 +1210,7 @@ public class TestDistributedLogSplitting {
     master.getMasterWalManager().prepareLogReplay(hrs.getServerName(), userRegionSet);
     boolean isMetaRegionInRecovery = false;
     List<String> recoveringRegions =
-        zkw.getRecoverableZooKeeper().getChildren(zkw.recoveringRegionsZNode, false);
+        zkw.getRecoverableZooKeeper().getChildren(zkw.znodePaths.recoveringRegionsZNode, false);
     for (String curEncodedRegionName : recoveringRegions) {
       if (curEncodedRegionName.equals(HRegionInfo.FIRST_META_REGIONINFO.getEncodedName())) {
         isMetaRegionInRecovery = true;
@@ -1223,7 +1223,7 @@ public class TestDistributedLogSplitting {
 
     isMetaRegionInRecovery = false;
     recoveringRegions =
-        zkw.getRecoverableZooKeeper().getChildren(zkw.recoveringRegionsZNode, false);
+        zkw.getRecoverableZooKeeper().getChildren(zkw.znodePaths.recoveringRegionsZNode, false);
     for (String curEncodedRegionName : recoveringRegions) {
       if (curEncodedRegionName.equals(HRegionInfo.FIRST_META_REGIONINFO.getEncodedName())) {
         isMetaRegionInRecovery = true;

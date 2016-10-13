@@ -56,9 +56,9 @@ import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.BulkLoadHFileRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.BulkLoadHFileRequest;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.TestHRegionServerBulkLoad;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -73,8 +73,9 @@ import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
 
 import com.google.common.collect.Multimap;
-import com.google.protobuf.RpcController;
-import com.google.protobuf.ServiceException;
+
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
 
 /**
  * Test cases for the atomic load error handling of the bulk load functionality.
@@ -281,8 +282,8 @@ public class TestLoadIncrementalHFilesSplitRecovery {
       LoadIncrementalHFiles lih = new LoadIncrementalHFiles(util.getConfiguration()) {
         @Override
         protected List<LoadQueueItem> tryAtomicRegionLoad(final Connection conn,
-            TableName tableName, final byte[] first, Collection<LoadQueueItem> lqis)
-                throws IOException {
+            TableName tableName, final byte[] first, Collection<LoadQueueItem> lqis,
+            boolean copyFile) throws IOException {
           int i = attmptedCalls.incrementAndGet();
           if (i == 1) {
             Connection errConn;
@@ -293,10 +294,10 @@ public class TestLoadIncrementalHFilesSplitRecovery {
               throw new RuntimeException("mocking cruft, should never happen");
             }
             failedCalls.incrementAndGet();
-            return super.tryAtomicRegionLoad(errConn, tableName, first, lqis);
+            return super.tryAtomicRegionLoad(errConn, tableName, first, lqis, copyFile);
           }
 
-          return super.tryAtomicRegionLoad(conn, tableName, first, lqis);
+          return super.tryAtomicRegionLoad(conn, tableName, first, lqis, copyFile);
         }
       };
       try {
@@ -317,7 +318,7 @@ public class TestLoadIncrementalHFilesSplitRecovery {
 
   @SuppressWarnings("deprecation")
   private ClusterConnection getMockedConnection(final Configuration conf)
-  throws IOException, ServiceException {
+  throws IOException, org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException {
     ClusterConnection c = Mockito.mock(ClusterConnection.class);
     Mockito.when(c.getConfiguration()).thenReturn(conf);
     Mockito.doNothing().when(c).close();
@@ -359,13 +360,14 @@ public class TestLoadIncrementalHFilesSplitRecovery {
         @Override
         protected void bulkLoadPhase(final Table htable, final Connection conn,
             ExecutorService pool, Deque<LoadQueueItem> queue,
-            final Multimap<ByteBuffer, LoadQueueItem> regionGroups) throws IOException {
+            final Multimap<ByteBuffer, LoadQueueItem> regionGroups, boolean copyFile)
+                throws IOException {
           int i = attemptedCalls.incrementAndGet();
           if (i == 1) {
             // On first attempt force a split.
             forceSplit(table);
           }
-          super.bulkLoadPhase(htable, conn, pool, queue, regionGroups);
+          super.bulkLoadPhase(htable, conn, pool, queue, regionGroups, copyFile);
         }
       };
 

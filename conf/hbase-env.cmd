@@ -18,7 +18,7 @@
 
 @rem Set environment variables here.
 
-@rem The java implementation to use.  Java 1.7+ required.
+@rem The java implementation to use.  Java 1.8+ required.
 @rem set JAVA_HOME=c:\apps\java
 
 @rem Extra Java CLASSPATH elements.  Optional.
@@ -41,10 +41,6 @@
 @rem JDK6 on Windows has a known bug for IPv6, use preferIPv4Stack unless JDK7.
 @rem @rem See TestIPv6NIOServerSocketChannel.
 set HBASE_OPTS="-XX:+UseConcMarkSweepGC" "-Djava.net.preferIPv4Stack=true"
-
-@rem Configure PermSize. Only needed in JDK7. You can safely remove it for JDK8+
-set HBASE_MASTER_OPTS=%HBASE_MASTER_OPTS% "-XX:PermSize=128m" "-XX:MaxPermSize=128m"
-set HBASE_REGIONSERVER_OPTS=%HBASE_REGIONSERVER_OPTS% "-XX:PermSize=128m" "-XX:MaxPermSize=128m"
 
 @rem Uncomment below to enable java garbage collection logging for the server-side processes
 @rem this enables basic gc logging for the server processes to the .out file

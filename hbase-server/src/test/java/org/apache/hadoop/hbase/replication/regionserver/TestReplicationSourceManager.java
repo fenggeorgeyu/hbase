@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.replication.regionserver;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -56,24 +57,30 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.client.ClusterConnection;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.BulkLoadDescriptor;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.BulkLoadDescriptor;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.replication.ReplicationEndpoint;
 import org.apache.hadoop.hbase.replication.ReplicationFactory;
+import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.replication.ReplicationPeers;
 import org.apache.hadoop.hbase.replication.ReplicationQueues;
 import org.apache.hadoop.hbase.replication.ReplicationQueuesArguments;
+import org.apache.hadoop.hbase.replication.ReplicationSourceDummy;
 import org.apache.hadoop.hbase.replication.ReplicationStateZKBase;
 import org.apache.hadoop.hbase.replication.regionserver.ReplicationSourceManager.NodeFailoverWorker;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
-import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hbase.wal.WALKey;
@@ -285,7 +292,6 @@ public abstract class TestReplicationSourceManager {
 
   @Test
   public void testClaimQueues() throws Exception {
-    conf.setBoolean(HConstants.ZOOKEEPER_USEMULTI, true);
     final Server server = new DummyServer("hostname0.example.org");
 
 
@@ -424,6 +430,62 @@ public abstract class TestReplicationSourceManager {
       scopes.containsKey(f2));
   }
 
+  /**
+   * Test whether calling removePeer() on a ReplicationSourceManager that failed on initializing the
+   * corresponding ReplicationSourceInterface correctly cleans up the corresponding
+   * replication queue and ReplicationPeer.
+   * See HBASE-16096.
+   * @throws Exception
+   */
+  @Test
+  public void testPeerRemovalCleanup() throws Exception{
+    String replicationSourceImplName = conf.get("replication.replicationsource.implementation");
+    try {
+      DummyServer server = new DummyServer();
+      final ReplicationQueues rq =
+          ReplicationFactory.getReplicationQueues(new ReplicationQueuesArguments(
+              server.getConfiguration(), server, server.getZooKeeper()));
+      rq.init(server.getServerName().toString());
+      // Purposely fail ReplicationSourceManager.addSource() by causing ReplicationSourceInterface
+      // initialization to throw an exception.
+      conf.set("replication.replicationsource.implementation",
+          FailInitializeDummyReplicationSource.class.getName());
+      final ReplicationPeers rp = manager.getReplicationPeers();
+      // Set up the znode and ReplicationPeer for the fake peer
+      rp.registerPeer("FakePeer", new ReplicationPeerConfig().setClusterKey("localhost:1:/hbase"));
+      // Wait for the peer to get created and connected
+      Waiter.waitFor(conf, 20000, new Waiter.Predicate<Exception>() {
+        @Override
+        public boolean evaluate() throws Exception {
+          return (rp.getConnectedPeer("FakePeer") != null);
+        }
+      });
+
+      // Make sure that the replication source was not initialized
+      List<ReplicationSourceInterface> sources = manager.getSources();
+      for (ReplicationSourceInterface source : sources) {
+        assertNotEquals("FakePeer", source.getPeerClusterId());
+      }
+
+      // Create a replication queue for the fake peer
+      rq.addLog("FakePeer", "FakeFile");
+      // Unregister peer, this should remove the peer and clear all queues associated with it
+      // Need to wait for the ReplicationTracker to pick up the changes and notify listeners.
+      rp.unregisterPeer("FakePeer");
+      Waiter.waitFor(conf, 20000, new Waiter.Predicate<Exception>() {
+        @Override
+        public boolean evaluate() throws Exception {
+          List<String> peers = rp.getAllPeerIds();
+          return (!rq.getAllQueues().contains("FakePeer"))
+              && (rp.getConnectedPeer("FakePeer") == null)
+              && (!peers.contains("FakePeer"));
+          }
+      });
+    } finally {
+      conf.set("replication.replicationsource.implementation", replicationSourceImplName);
+    }
+  }
+
   private WALEdit getBulkLoadWALEdit(NavigableMap<byte[], Integer> scope) {
     // 1. Create store files for the families
     Map<byte[], List<Path>> storeFiles = new HashMap<>(1);
@@ -452,7 +514,7 @@ public abstract class TestReplicationSourceManager {
     // 2. Create bulk load descriptor
     BulkLoadDescriptor desc =
         ProtobufUtil.toBulkLoadDescriptor(hri.getTable(),
-          ByteStringer.wrap(hri.getEncodedNameAsBytes()), storeFiles, storeFilesSize, 1);
+      UnsafeByteOperations.unsafeWrap(hri.getEncodedNameAsBytes()), storeFiles, storeFilesSize, 1);
 
     // 3. create bulk load wal edit event
     WALEdit logEdit = WALEdit.createBulkLoadEvent(hri, desc);
@@ -477,7 +539,12 @@ public abstract class TestReplicationSourceManager {
     @Override
     public void run() {
       try {
-        logZnodesMap = rq.claimQueues(deadRsZnode);
+        logZnodesMap = new HashMap<>();
+        List<String> queues = rq.getUnClaimedQueueIds(deadRsZnode);
+        for(String queue:queues){
+          Pair<String, SortedSet<String>> pair = rq.claimQueue(deadRsZnode, queue);
+          logZnodesMap.put(pair.getFirst(), pair.getSecond());
+        }
         server.abort("Done with testing", null);
       } catch (Exception e) {
         LOG.error("Got exception while running NodeFailoverWorker", e);
@@ -505,6 +572,17 @@ public abstract class TestReplicationSourceManager {
         return 1; // we found all the files
       }
       return 0;
+    }
+  }
+
+  static class FailInitializeDummyReplicationSource extends ReplicationSourceDummy {
+
+    @Override
+    public void init(Configuration conf, FileSystem fs, ReplicationSourceManager manager,
+        ReplicationQueues rq, ReplicationPeers rp, Stoppable stopper, String peerClusterId,
+        UUID clusterId, ReplicationEndpoint replicationEndpoint, MetricsSource metrics)
+        throws IOException {
+      throw new IOException("Failing deliberately");
     }
   }
 

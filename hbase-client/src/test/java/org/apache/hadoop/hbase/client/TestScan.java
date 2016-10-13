@@ -24,16 +24,21 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Set;
-
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.security.visibility.Authorizations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Assert;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+
 
 // TODO: cover more test cases
 @Category({ClientTests.class, SmallTests.class})
@@ -54,6 +59,40 @@ public class TestScan {
     Assert.assertTrue(Arrays.equals(Bytes.toBytes("value2"), scan2.getAttribute("attribute2")));
     Assert.assertTrue(Arrays.equals(Bytes.toBytes("value3"), scan2.getAttribute("attribute3")));
     Assert.assertEquals(3, scan2.getAttributesMap().size());
+  }
+
+  @Test
+  public void testGetToScan() throws IOException {
+    Get get = new Get(Bytes.toBytes(1));
+    get.setCacheBlocks(true)
+            .setConsistency(Consistency.TIMELINE)
+            .setFilter(new FilterList())
+            .setId("get")
+            .setIsolationLevel(IsolationLevel.READ_COMMITTED)
+            .setLoadColumnFamiliesOnDemand(false)
+            .setMaxResultsPerColumnFamily(1000)
+            .setMaxVersions(9999)
+            .setRowOffsetPerColumnFamily(5)
+            .setTimeRange(0, 13)
+            .setAttribute("att_v0", Bytes.toBytes("att_v0"))
+            .setColumnFamilyTimeRange(Bytes.toBytes("cf"), 0, 123);
+    Scan scan = new Scan(get);
+    assertEquals(get.getCacheBlocks(), scan.getCacheBlocks());
+    assertEquals(get.getConsistency(), scan.getConsistency());
+    assertEquals(get.getFilter(), scan.getFilter());
+    assertEquals(get.getId(), scan.getId());
+    assertEquals(get.getIsolationLevel(), scan.getIsolationLevel());
+    assertEquals(get.getLoadColumnFamiliesOnDemandValue(), scan.getLoadColumnFamiliesOnDemandValue());
+    assertEquals(get.getMaxResultsPerColumnFamily(), scan.getMaxResultsPerColumnFamily());
+    assertEquals(get.getMaxVersions(), scan.getMaxVersions());
+    assertEquals(get.getRowOffsetPerColumnFamily(), scan.getRowOffsetPerColumnFamily());
+    assertEquals(get.getTimeRange().getMin(), scan.getTimeRange().getMin());
+    assertEquals(get.getTimeRange().getMax(), scan.getTimeRange().getMax());
+    assertTrue(Bytes.equals(get.getAttribute("att_v0"), scan.getAttribute("att_v0")));
+    assertEquals(get.getColumnFamilyTimeRange().get(Bytes.toBytes("cf")).getMin(),
+            scan.getColumnFamilyTimeRange().get(Bytes.toBytes("cf")).getMin());
+    assertEquals(get.getColumnFamilyTimeRange().get(Bytes.toBytes("cf")).getMax(),
+            scan.getColumnFamilyTimeRange().get(Bytes.toBytes("cf")).getMax());
   }
 
   @Test
@@ -130,6 +169,32 @@ public class TestScan {
       scan.setAuthorizations(new Authorizations("/B"));
     } catch (IllegalArgumentException e) {
       fail("should not throw exception");
+    }
+  }
+
+  @Test
+  public void testSetStartRowAndSetStopRow() {
+    Scan scan = new Scan();
+    scan.setStartRow(null);
+    scan.setStartRow(new byte[1]);
+    scan.setStartRow(new byte[HConstants.MAX_ROW_LENGTH]);
+    try {
+      scan.setStartRow(new byte[HConstants.MAX_ROW_LENGTH+1]);
+      fail("should've thrown exception");
+    } catch (IllegalArgumentException iae) {
+    } catch (Exception e) {
+      fail("expected IllegalArgumentException to be thrown");
+    }
+
+    scan.setStopRow(null);
+    scan.setStopRow(new byte[1]);
+    scan.setStopRow(new byte[HConstants.MAX_ROW_LENGTH]);
+    try {
+      scan.setStopRow(new byte[HConstants.MAX_ROW_LENGTH+1]);
+      fail("should've thrown exception");
+    } catch (IllegalArgumentException iae) {
+    } catch (Exception e) {
+      fail("expected IllegalArgumentException to be thrown");
     }
   }
 }

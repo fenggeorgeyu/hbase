@@ -59,12 +59,12 @@ import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.MasterFileSystem;
 import org.apache.hadoop.hbase.mob.MobUtils;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.client.SnapshotDescription;
-import org.apache.hadoop.hbase.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsSnapshotDoneRequest;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsSnapshotDoneResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.IsSnapshotDoneRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.IsSnapshotDoneResponse;
 import org.apache.hadoop.hbase.regionserver.HRegionFileSystem;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
@@ -82,9 +82,10 @@ import com.google.protobuf.ServiceException;
  */
 @InterfaceAudience.Private
 public final class SnapshotTestingUtils {
-
   private static final Log LOG = LogFactory.getLog(SnapshotTestingUtils.class);
-  private static byte[] KEYS = Bytes.toBytes("0123456789");
+
+  // default number of regions (and keys) given by getSplitKeys() and createTable()
+  private static byte[] KEYS = Bytes.toBytes("0123456");
 
   private SnapshotTestingUtils() {
     // private constructor for utility class
@@ -270,9 +271,11 @@ public final class SnapshotTestingUtils {
    * @param snapshot: the snapshot to check
    * @param sleep: amount to sleep between checks to see if the snapshot is done
    * @throws ServiceException if the snapshot fails
+   * @throws org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException 
    */
   public static void waitForSnapshotToComplete(HMaster master,
-      HBaseProtos.SnapshotDescription snapshot, long sleep) throws ServiceException {
+      HBaseProtos.SnapshotDescription snapshot, long sleep)
+          throws org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException {
     final IsSnapshotDoneRequest request = IsSnapshotDoneRequest.newBuilder()
         .setSnapshot(snapshot).build();
     IsSnapshotDoneResponse done = IsSnapshotDoneResponse.newBuilder()
@@ -282,7 +285,7 @@ public final class SnapshotTestingUtils {
       try {
         Thread.sleep(sleep);
       } catch (InterruptedException e) {
-        throw new ServiceException(e);
+        throw new org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException(e);
       }
     }
   }
@@ -335,9 +338,9 @@ public final class SnapshotTestingUtils {
     try {
       master.getMasterRpcServices().isSnapshotDone(null, snapshot);
       Assert.fail("didn't fail to lookup a snapshot");
-    } catch (ServiceException se) {
+    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException se) {
       try {
-        throw ProtobufUtil.getRemoteException(se);
+        throw ProtobufUtil.handleRemoteException(se);
       } catch (HBaseSnapshotException e) {
         assertEquals("Threw wrong snapshot exception!", clazz, e.getClass());
       } catch (Throwable t) {
@@ -583,6 +586,18 @@ public final class SnapshotTestingUtils {
         corruptFile(p);
       }
 
+      public void missOneRegionSnapshotFile() throws IOException {
+        FileStatus[] manifestFiles = FSUtils.listStatus(fs, snapshotDir);
+        for (FileStatus fileStatus : manifestFiles) {
+          String fileName = fileStatus.getPath().getName();
+          if (fileName.endsWith(SnapshotDescriptionUtils.SNAPSHOTINFO_FILE)
+            || fileName.endsWith(".tabledesc")
+            || fileName.endsWith(SnapshotDescriptionUtils.SNAPSHOT_TMP_DIR_NAME)) {
+              fs.delete(fileStatus.getPath(), true);
+          }
+        }
+      }
+
       /**
        * Corrupt data-manifest file
        *
@@ -738,23 +753,32 @@ public final class SnapshotTestingUtils {
   }
 
   public static void createTable(final HBaseTestingUtility util, final TableName tableName,
-      int regionReplication, final byte[]... families) throws IOException, InterruptedException {
+      int regionReplication, int nRegions, final byte[]... families)
+      throws IOException, InterruptedException {
     HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.setRegionReplication(regionReplication);
     for (byte[] family : families) {
       HColumnDescriptor hcd = new HColumnDescriptor(family);
       htd.addFamily(hcd);
     }
-    byte[][] splitKeys = getSplitKeys();
+    byte[][] splitKeys = getSplitKeys(nRegions);
     util.createTable(htd, splitKeys);
     assertEquals((splitKeys.length + 1) * regionReplication,
         util.getHBaseAdmin().getTableRegions(tableName).size());
   }
 
   public static byte[][] getSplitKeys() {
-    byte[][] splitKeys = new byte[KEYS.length-2][];
+    return getSplitKeys(KEYS.length);
+  }
+
+  public static byte[][] getSplitKeys(int nRegions) {
+    nRegions = nRegions < KEYS.length ? nRegions : (KEYS.length - 1);
+    final byte[][] splitKeys = new byte[nRegions-1][];
+    final int step = KEYS.length / nRegions;
+    int keyIndex = 1;
     for (int i = 0; i < splitKeys.length; ++i) {
-      splitKeys[i] = new byte[] { KEYS[i+1] };
+      splitKeys[i] = new byte[] { KEYS[keyIndex] };
+      keyIndex += step;
     }
     return splitKeys;
   }
@@ -762,6 +786,16 @@ public final class SnapshotTestingUtils {
   public static void createTable(final HBaseTestingUtility util, final TableName tableName,
       final byte[]... families) throws IOException, InterruptedException {
     createTable(util, tableName, 1, families);
+  }
+
+  public static void createTable(final HBaseTestingUtility util, final TableName tableName,
+      final int regionReplication, final byte[]... families) throws IOException, InterruptedException {
+    createTable(util, tableName, regionReplication, KEYS.length, families);
+  }
+
+  public static void createPreSplitTable(final HBaseTestingUtility util, final TableName tableName,
+      final int nRegions, final byte[]... families) throws IOException, InterruptedException {
+    createTable(util, tableName, 1, nRegions, families);
   }
 
   public static void loadData(final HBaseTestingUtility util, final TableName tableName, int rows,
@@ -849,6 +883,6 @@ public final class SnapshotTestingUtils {
         }
       }
     }
-    assert(set.size() == getSplitKeys().length + 1);
+    assertEquals(getSplitKeys().length + 1, set.size());
   }
 }

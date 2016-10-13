@@ -785,7 +785,8 @@ public class IntegrationTestBigLinkedList extends IntegrationTestBase {
 
       job.getConfiguration().setBoolean("mapreduce.map.speculative", false);
       TableMapReduceUtil.addDependencyJars(job);
-      TableMapReduceUtil.addDependencyJars(job.getConfiguration(), AbstractHBaseTool.class);
+      TableMapReduceUtil.addDependencyJarsForClasses(job.getConfiguration(),
+                                                     AbstractHBaseTool.class);
       TableMapReduceUtil.initCredentials(job);
 
       boolean success = jobCompletion(job);
@@ -806,6 +807,16 @@ public class IntegrationTestBigLinkedList extends IntegrationTestBase {
     public int run(int numMappers, long numNodes, Path tmpOutput,
         Integer width, Integer wrapMultiplier, Integer numWalkers)
         throws Exception {
+      long wrap = (long)width*wrapMultiplier;
+      if (wrap < numNodes && numNodes % wrap != 0) {
+        /**
+         *  numNodes should be a multiple of width*wrapMultiplier.
+         *  If numNodes less than wrap, wrap will be set to be equal with numNodes,
+         *  See {@link GeneratorMapper#setup(Mapper.Context)}
+         * */
+        System.err.println(USAGE);
+        return 1;
+      }
       int ret = runRandomInputGenerator(numMappers, numNodes, tmpOutput, width, wrapMultiplier,
           numWalkers);
       if (ret > 0) {
@@ -1296,7 +1307,8 @@ public class IntegrationTestBigLinkedList extends IntegrationTestBase {
 
       TableMapReduceUtil.initTableMapperJob(getTableName(getConf()).getName(), scan,
           VerifyMapper.class, BytesWritable.class, BytesWritable.class, job);
-      TableMapReduceUtil.addDependencyJars(job.getConfiguration(), AbstractHBaseTool.class);
+      TableMapReduceUtil.addDependencyJarsForClasses(job.getConfiguration(),
+                                                     AbstractHBaseTool.class);
 
       job.getConfiguration().setBoolean("mapreduce.map.speculative", false);
 

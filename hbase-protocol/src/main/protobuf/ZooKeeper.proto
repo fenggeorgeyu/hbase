@@ -121,6 +121,7 @@ message ReplicationPeer {
   repeated BytesBytesPair data = 3;
   repeated NameStringPair configuration = 4;
   repeated TableCF table_cfs = 5;
+  repeated bytes namespaces = 6;
 }
 
 /**
@@ -142,13 +143,6 @@ message ReplicationHLogPosition {
 }
 
 /**
- * Used by replication. Used to lock a region server during failover.
- */
-message ReplicationLock {
-  required string lock_owner = 1;
-}
-
-/**
  * Metadata associated with a table lock in zookeeper
  */
 message TableLock {
@@ -165,12 +159,4 @@ message TableLock {
  */
 message SwitchState {
   optional bool enabled = 1;
-}
-
-/**
- * State for split and merge, used in hbck
- */
-message SplitAndMergeState {
-  optional bool split_enabled = 1;
-  optional bool merge_enabled = 2;
 }

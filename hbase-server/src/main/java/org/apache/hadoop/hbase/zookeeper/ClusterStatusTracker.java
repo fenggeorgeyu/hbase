@@ -22,8 +22,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.Abortable;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
 import org.apache.zookeeper.KeeperException;
 
 /**
@@ -46,7 +46,7 @@ public class ClusterStatusTracker extends ZooKeeperNodeTracker {
    * @param abortable
    */
   public ClusterStatusTracker(ZooKeeperWatcher watcher, Abortable abortable) {
-    super(watcher, watcher.clusterStateZNode, abortable);
+    super(watcher, watcher.znodePaths.clusterStateZNode, abortable);
   }
 
   /**
@@ -66,9 +66,9 @@ public class ClusterStatusTracker extends ZooKeeperNodeTracker {
   throws KeeperException {
     byte [] upData = toByteArray();
     try {
-      ZKUtil.createAndWatch(watcher, watcher.clusterStateZNode, upData);
+      ZKUtil.createAndWatch(watcher, watcher.znodePaths.clusterStateZNode, upData);
     } catch(KeeperException.NodeExistsException nee) {
-      ZKUtil.setData(watcher, watcher.clusterStateZNode, upData);
+      ZKUtil.setData(watcher, watcher.znodePaths.clusterStateZNode, upData);
     }
   }
 
@@ -79,10 +79,10 @@ public class ClusterStatusTracker extends ZooKeeperNodeTracker {
   public void setClusterDown()
   throws KeeperException {
     try {
-      ZKUtil.deleteNode(watcher, watcher.clusterStateZNode);
+      ZKUtil.deleteNode(watcher, watcher.znodePaths.clusterStateZNode);
     } catch(KeeperException.NoNodeException nne) {
       LOG.warn("Attempted to set cluster as down but already down, cluster " +
-          "state node (" + watcher.clusterStateZNode + ") not found");
+          "state node (" + watcher.znodePaths.clusterStateZNode + ") not found");
     }
   }
 

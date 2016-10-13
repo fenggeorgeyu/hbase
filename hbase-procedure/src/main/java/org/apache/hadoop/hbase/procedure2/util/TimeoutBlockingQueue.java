@@ -92,6 +92,22 @@ public class TimeoutBlockingQueue<E> {
     }
   }
 
+  public boolean remove(E e) {
+    if (e == null) return false;
+    lock.lock();
+    try {
+      for (int i = 0; i < objects.length; ++i) {
+        if (e.equals(objects[i])) {
+          objects[i] = null;
+          return true;
+        }
+      }
+      return false;
+    } finally {
+      lock.unlock();
+    }
+  }
+
   @edu.umd.cs.findbugs.annotations.SuppressWarnings("WA_AWAIT_NOT_IN_LOOP")
   public E poll() {
     lock.lock();
@@ -210,6 +226,7 @@ public class TimeoutBlockingQueue<E> {
   }
 
   private long getNanosTimeout(final E obj) {
+    if (obj == null) return 0;
     TimeUnit unit = timeoutRetriever.getTimeUnit(obj);
     long timeout = timeoutRetriever.getTimeout(obj);
     return unit.toNanos(timeout);

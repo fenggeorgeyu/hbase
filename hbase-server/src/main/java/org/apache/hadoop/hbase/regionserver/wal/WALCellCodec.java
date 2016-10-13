@@ -36,11 +36,12 @@ import org.apache.hadoop.hbase.codec.KeyValueCodecWithTags;
 import org.apache.hadoop.hbase.io.ByteBufferInputStream;
 import org.apache.hadoop.hbase.io.util.Dictionary;
 import org.apache.hadoop.hbase.io.util.StreamUtils;
+import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.io.IOUtils;
 
-import com.google.protobuf.ByteString;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString;
 
 
 /**
@@ -139,12 +140,16 @@ public class WALCellCodec implements Codec {
   //       an array of dictionaries.
   static class BaosAndCompressor extends ByteArrayOutputStream implements ByteStringCompressor {
     public ByteString toByteString() {
+      // We need this copy to create the ByteString as the byte[] 'buf' is not immutable. We reuse
+      // them.
       return ByteString.copyFrom(this.buf, 0, this.count);
     }
 
     @Override
     public ByteString compress(byte[] data, Dictionary dict) throws IOException {
       writeCompressed(data, dict);
+      // We need this copy to create the ByteString as the byte[] 'buf' is not immutable. We reuse
+      // them.
       ByteString result = ByteString.copyFrom(this.buf, 0, this.count);
       reset(); // Only resets the count - we reuse the byte array.
       return result;
@@ -339,6 +344,7 @@ public class WALCellCodec implements Codec {
     public void write(Cell cell) throws IOException {
       checkFlushed();
       // Make sure to write tags into WAL
+      ByteBufferUtils.putInt(this.out, KeyValueUtil.getSerializedSize(cell, true));
       KeyValueUtil.oswrite(cell, this.out, true);
     }
   }

@@ -51,6 +51,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
       "hbase.ipc.server.callqueue.scan.ratio";
   public static final String CALL_QUEUE_HANDLER_FACTOR_CONF_KEY =
       "hbase.ipc.server.callqueue.handler.factor";
+  static final String CODEL_FASTPATH_BALANCED_Q = "CodelFPBQ.default";
 
   /**
    * The default, 'fifo', has the least friction but is dumb.
@@ -96,9 +97,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
       replicationExecutor.resizeQueues(conf);
     }
 
-    String callQueueType = conf.get(CALL_QUEUE_TYPE_CONF_KEY,
-      CALL_QUEUE_TYPE_DEADLINE_CONF_VALUE);
-
+    String callQueueType = conf.get(CALL_QUEUE_TYPE_CONF_KEY, CALL_QUEUE_TYPE_CONF_DEFAULT);
     if (isCodelQueueType(callQueueType)) {
       // update CoDel Scheduler tunables
       int codelTargetDelay = conf.getInt(CALL_QUEUE_CODEL_TARGET_DELAY,
@@ -143,7 +142,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
       long deadlineB = priority.getDeadline(callB.getHeader(), callB.param);
       deadlineA = callA.timestamp + Math.min(deadlineA, maxDelay);
       deadlineB = callB.timestamp + Math.min(deadlineB, maxDelay);
-      return (int)(deadlineA - deadlineB);
+      return Long.compare(deadlineA, deadlineB);
     }
   }
 
@@ -184,8 +183,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
     this.highPriorityLevel = highPriorityLevel;
     this.abortable = server;
 
-    String callQueueType = conf.get(CALL_QUEUE_TYPE_CONF_KEY,
-        CALL_QUEUE_TYPE_FIFO_CONF_VALUE);
+    String callQueueType = conf.get(CALL_QUEUE_TYPE_CONF_KEY, CALL_QUEUE_TYPE_CONF_DEFAULT);
     float callqReadShare = conf.getFloat(CALL_QUEUE_READ_SHARE_CONF_KEY, 0);
     float callqScanShare = conf.getFloat(CALL_QUEUE_SCAN_SHARE_CONF_KEY, 0);
 
@@ -228,7 +226,7 @@ public class SimpleRpcScheduler extends RpcScheduler implements ConfigurationObs
             conf, abortable, BoundedPriorityBlockingQueue.class, maxQueueLength, callPriority);
       } else if (isCodelQueueType(callQueueType)) {
         callExecutor =
-          new FastPathBalancedQueueRpcExecutor("CodelFPBQ.default", handlerCount, numCallQueues,
+          new BalancedQueueRpcExecutor(CODEL_FASTPATH_BALANCED_Q, handlerCount, numCallQueues,
             conf, abortable, AdaptiveLifoCoDelCallQueue.class, maxQueueLength,
             codelTargetDelay, codelInterval, codelLifoThreshold,
             numGeneralCallsDropped, numLifoModeSwitches);

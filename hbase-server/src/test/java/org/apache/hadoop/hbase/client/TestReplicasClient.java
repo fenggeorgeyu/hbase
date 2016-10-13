@@ -46,13 +46,12 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.client.AsyncProcess.AsyncRequestFuture;
-import org.apache.hadoop.hbase.client.AsyncProcess.AsyncRequestFutureImpl;
 import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
-import org.apache.hadoop.hbase.protobuf.RequestConverter;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
@@ -248,7 +247,7 @@ public class TestReplicasClient {
   }
 
   private void closeRegion(HRegionInfo hri) throws Exception {
-    AdminProtos.CloseRegionRequest crr = RequestConverter.buildCloseRegionRequest(
+    AdminProtos.CloseRegionRequest crr = ProtobufUtil.buildCloseRegionRequest(
       getRS().getServerName(), hri.getEncodedName());
     AdminProtos.CloseRegionResponse responseClose = getRS()
         .getRSRpcServices().closeRegion(null, crr);
@@ -573,11 +572,11 @@ public class TestReplicasClient {
         Assert.assertTrue(((Result)r).isStale());
         Assert.assertTrue(((Result)r).getExists());
       }
-      Set<PayloadCarryingServerCallable> set =
+      Set<CancellableRegionServerCallable> set =
           ((AsyncRequestFutureImpl<?>)reqs).getCallsInProgress();
       // verify we did cancel unneeded calls
       Assert.assertTrue(!set.isEmpty());
-      for (PayloadCarryingServerCallable m : set) {
+      for (CancellableRegionServerCallable m : set) {
         Assert.assertTrue(m.isCancelled());
       }
     } finally {

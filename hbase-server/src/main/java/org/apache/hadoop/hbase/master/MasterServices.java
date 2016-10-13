@@ -147,6 +147,13 @@ public interface MasterServices extends Server {
       final long nonce) throws IOException;
 
   /**
+   * Create a system table using the given table definition.
+   * @param hTableDescriptor The system table definition
+   *     a single region is created.
+   */
+  long createSystemTable(final HTableDescriptor hTableDescriptor) throws IOException;
+
+  /**
    * Delete a table
    * @param tableName The table name
    * @param nonceGroup
@@ -310,6 +317,11 @@ public interface MasterServices extends Server {
   boolean isInitialized();
 
   /**
+   * @return true if master is in maintanceMode
+   */
+  boolean isInMaintenanceMode();
+
+  /**
    * Abort a procedure.
    * @param procId ID of the procedure
    * @param mayInterruptIfRunning if the proc completed at least one step, should it be aborted?
@@ -362,4 +374,9 @@ public interface MasterServices extends Server {
    * @return load balancer
    */
   public LoadBalancer getLoadBalancer();
+
+  /**
+   * @return True if this master is stopping.
+   */
+  boolean isStopping();
 }

@@ -38,8 +38,8 @@ import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.ServerManager;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.After;
@@ -68,14 +68,13 @@ public class TestRSGroups extends TestRSGroupsBase {
   @BeforeClass
   public static void setUp() throws Exception {
     TEST_UTIL = new HBaseTestingUtility();
+    TEST_UTIL.getConfiguration().setFloat(
+            "hbase.master.balancer.stochastic.tableSkewCost", 6000);
     TEST_UTIL.getConfiguration().set(
         HConstants.HBASE_MASTER_LOADBALANCER_CLASS,
         RSGroupBasedLoadBalancer.class.getName());
     TEST_UTIL.getConfiguration().set(CoprocessorHost.MASTER_COPROCESSOR_CONF_KEY,
         RSGroupAdminEndpoint.class.getName());
-    TEST_UTIL.getConfiguration().setBoolean(
-        HConstants.ZOOKEEPER_USEMULTI,
-        true);
     TEST_UTIL.startMiniCluster(NUM_SLAVES_BASE);
     TEST_UTIL.getConfiguration().set(
         ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART,

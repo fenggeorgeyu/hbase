@@ -23,9 +23,11 @@ import static org.apache.hadoop.hbase.Tag.TAG_LENGTH_SIZE;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map.Entry;
@@ -33,12 +35,14 @@ import java.util.NavigableMap;
 
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.classification.InterfaceAudience.Private;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.TagCompressionContext;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.ByteRange;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.ClassSize;
 
 /**
  * Utility methods helpful slinging {@link Cell} instances.
@@ -138,6 +142,22 @@ public final class CellUtil {
     return destinationOffset + rowLen;
   }
 
+  /**
+   * Copies the row to a new byte[]
+   * @param cell the cell from which row has to copied
+   * @return the byte[] containing the row
+   */
+  public static byte[] copyRow(Cell cell) {
+    if (cell instanceof ByteBufferedCell) {
+      return ByteBufferUtils.copyOfRange(((ByteBufferedCell) cell).getRowByteBuffer(),
+        ((ByteBufferedCell) cell).getRowPosition(),
+        ((ByteBufferedCell) cell).getRowPosition() + cell.getRowLength());
+    } else {
+      return Arrays.copyOfRange(cell.getRowArray(), cell.getRowOffset(),
+        cell.getRowOffset() + cell.getRowLength());
+    }
+  }
+
   public static int copyFamilyTo(Cell cell, byte[] destination, int destinationOffset) {
     byte fLen = cell.getFamilyLength();
     if (cell instanceof ByteBufferedCell) {
@@ -199,12 +219,22 @@ public final class CellUtil {
 
   /********************* misc *************************************/
 
+  @Private
   public static byte getRowByte(Cell cell, int index) {
     if (cell instanceof ByteBufferedCell) {
       return ((ByteBufferedCell) cell).getRowByteBuffer().get(
           ((ByteBufferedCell) cell).getRowPosition() + index);
     }
     return cell.getRowArray()[cell.getRowOffset() + index];
+  }
+
+  @Private
+  public static byte getQualifierByte(Cell cell, int index) {
+    if (cell instanceof ByteBufferedCell) {
+      return ((ByteBufferedCell) cell).getQualifierByteBuffer().get(
+          ((ByteBufferedCell) cell).getQualifierPosition() + index);
+    }
+    return cell.getQualifierArray()[cell.getQualifierOffset() + index];
   }
 
   public static ByteBuffer getValueBufferShallowCopy(Cell cell) {
@@ -323,6 +353,223 @@ public final class CellUtil {
     // See above in createCell(final byte [] row, final byte [] value) why we set type to Maximum.
     return createCell(row, family, qualifier,
         HConstants.LATEST_TIMESTAMP, KeyValue.Type.Maximum.getCode(), HConstants.EMPTY_BYTE_ARRAY);
+  }
+
+  /**
+   * @return A new cell which is having the extra tags also added to it.
+   */
+  public static Cell createCell(Cell cell, List<Tag> tags) {
+    return createCell(cell, TagUtil.fromList(tags));
+  }
+
+  /**
+   * @return A new cell which is having the extra tags also added to it.
+   */
+  public static Cell createCell(Cell cell, byte[] tags) {
+    if (cell instanceof ShareableMemory) {
+      return new ShareableMemoryTagRewriteCell(cell, tags);
+    }
+    return new TagRewriteCell(cell, tags);
+  }
+
+  /**
+   * This can be used when a Cell has to change with addition/removal of one or more tags. This is an
+   * efficient way to do so in which only the tags bytes part need to recreated and copied. All other
+   * parts, refer to the original Cell.
+   */
+  @InterfaceAudience.Private
+  private static class TagRewriteCell implements ExtendedCell {
+    protected Cell cell;
+    protected byte[] tags;
+
+    /**
+     * @param cell The original Cell which it rewrites
+     * @param tags the tags bytes. The array suppose to contain the tags bytes alone.
+     */
+    public TagRewriteCell(Cell cell, byte[] tags) {
+      assert cell instanceof ExtendedCell;
+      assert tags != null;
+      this.cell = cell;
+      this.tags = tags;
+      // tag offset will be treated as 0 and length this.tags.length
+      if (this.cell instanceof TagRewriteCell) {
+        // Cleaning the ref so that the byte[] can be GCed
+        ((TagRewriteCell) this.cell).tags = null;
+      }
+    }
+
+    @Override
+    public byte[] getRowArray() {
+      return cell.getRowArray();
+    }
+
+    @Override
+    public int getRowOffset() {
+      return cell.getRowOffset();
+    }
+
+    @Override
+    public short getRowLength() {
+      return cell.getRowLength();
+    }
+
+    @Override
+    public byte[] getFamilyArray() {
+      return cell.getFamilyArray();
+    }
+
+    @Override
+    public int getFamilyOffset() {
+      return cell.getFamilyOffset();
+    }
+
+    @Override
+    public byte getFamilyLength() {
+      return cell.getFamilyLength();
+    }
+
+    @Override
+    public byte[] getQualifierArray() {
+      return cell.getQualifierArray();
+    }
+
+    @Override
+    public int getQualifierOffset() {
+      return cell.getQualifierOffset();
+    }
+
+    @Override
+    public int getQualifierLength() {
+      return cell.getQualifierLength();
+    }
+
+    @Override
+    public long getTimestamp() {
+      return cell.getTimestamp();
+    }
+
+    @Override
+    public byte getTypeByte() {
+      return cell.getTypeByte();
+    }
+
+    @Override
+    public long getSequenceId() {
+      return cell.getSequenceId();
+    }
+
+    @Override
+    public byte[] getValueArray() {
+      return cell.getValueArray();
+    }
+
+    @Override
+    public int getValueOffset() {
+      return cell.getValueOffset();
+    }
+
+    @Override
+    public int getValueLength() {
+      return cell.getValueLength();
+    }
+
+    @Override
+    public byte[] getTagsArray() {
+      return this.tags;
+    }
+
+    @Override
+    public int getTagsOffset() {
+      return 0;
+    }
+
+    @Override
+    public int getTagsLength() {
+      if (null == this.tags) {
+        // Nulled out tags array optimization in constructor
+        return 0;
+      }
+      return this.tags.length;
+    }
+
+    @Override
+    public long heapSize() {
+      long sum = CellUtil.estimatedHeapSizeOf(cell) - cell.getTagsLength();
+      sum += ClassSize.OBJECT;// this object itself
+      sum += (2 * ClassSize.REFERENCE);// pointers to cell and tags array
+      if (this.tags != null) {
+        sum += ClassSize.align(ClassSize.ARRAY);// "tags"
+        sum += this.tags.length;
+      }
+      return sum;
+    }
+
+    @Override
+    public void setTimestamp(long ts) throws IOException {
+      // The incoming cell is supposed to be SettableTimestamp type.
+      CellUtil.setTimestamp(cell, ts);
+    }
+
+    @Override
+    public void setTimestamp(byte[] ts, int tsOffset) throws IOException {
+      // The incoming cell is supposed to be SettableTimestamp type.
+      CellUtil.setTimestamp(cell, ts, tsOffset);
+    }
+
+    @Override
+    public void setSequenceId(long seqId) throws IOException {
+      // The incoming cell is supposed to be SettableSequenceId type.
+      CellUtil.setSequenceId(cell, seqId);
+    }
+
+    @Override
+    public int write(OutputStream out, boolean withTags) throws IOException {
+      int len = ((ExtendedCell) this.cell).write(out, false);
+      if (withTags && this.tags != null) {
+        // Write the tagsLength 2 bytes
+        out.write((byte) (0xff & (this.tags.length >> 8)));
+        out.write((byte) (0xff & this.tags.length));
+        out.write(this.tags);
+        len += KeyValue.TAGS_LENGTH_SIZE + this.tags.length;
+      }
+      return len;
+    }
+
+    @Override
+    public int getSerializedSize(boolean withTags) {
+      int len = ((ExtendedCell) this.cell).getSerializedSize(false);
+      if (withTags && this.tags != null) {
+        len += KeyValue.TAGS_LENGTH_SIZE + this.tags.length;
+      }
+      return len;
+    }
+
+    @Override
+    public void write(byte[] buf, int offset) {
+      offset = KeyValueUtil.appendToByteArray(this.cell, buf, offset, false);
+      int tagsLen = this.tags.length;
+      assert tagsLen > 0;
+      offset = Bytes.putAsShort(buf, offset, tagsLen);
+      System.arraycopy(this.tags, 0, buf, offset, tagsLen);
+    }
+  }
+
+  /**
+   * Version of TagRewriteCell where the original Cell is ShareableMemory type.
+   */
+  private static class ShareableMemoryTagRewriteCell extends TagRewriteCell implements
+      ShareableMemory {
+
+    public ShareableMemoryTagRewriteCell(Cell cell, byte[] tags) {
+      super(cell, tags);
+      assert cell instanceof ShareableMemory;
+    }
+
+    @Override
+    public Cell cloneToCell() {
+      Cell clonedBaseCell = ((ShareableMemory) this.cell).cloneToCell();
+      return new TagRewriteCell(clonedBaseCell, this.tags);
+    }
   }
 
   /**
@@ -495,8 +742,8 @@ public final class CellUtil {
           ((ByteBufferedCell) right).getFamilyPosition(), rfamlength,
           left.getFamilyArray(), left.getFamilyOffset(), lfamlength);
     }
-    return Bytes.equals(left.getFamilyArray(), left.getFamilyOffset(), left.getFamilyLength(),
-        right.getFamilyArray(), right.getFamilyOffset(), right.getFamilyLength());
+    return Bytes.equals(left.getFamilyArray(), left.getFamilyOffset(), lfamlength,
+        right.getFamilyArray(), right.getFamilyOffset(), rfamlength);
   }
 
   public static boolean matchingFamily(final Cell left, final byte[] buf) {
@@ -537,8 +784,8 @@ public final class CellUtil {
           left.getQualifierArray(), left.getQualifierOffset(), lqlength);
     }
     return Bytes.equals(left.getQualifierArray(), left.getQualifierOffset(),
-        left.getQualifierLength(), right.getQualifierArray(), right.getQualifierOffset(),
-        right.getQualifierLength());
+        lqlength, right.getQualifierArray(), right.getQualifierOffset(),
+        rqlength);
   }
 
   /**
@@ -685,6 +932,7 @@ public final class CellUtil {
   }
 
   /**
+   * Estimate based on keyvalue's serialization format.
    * @param cell
    * @return Estimate of the <code>cell</code> size in bytes.
    */
@@ -698,7 +946,7 @@ public final class CellUtil {
     return getSumOfCellElementLengths(cell) +
       // Use the KeyValue's infrastructure size presuming that another implementation would have
       // same basic cost.
-      KeyValue.KEY_INFRASTRUCTURE_SIZE +
+      KeyValue.ROW_LENGTH_SIZE + KeyValue.FAMILY_LENGTH_SIZE +
       // Serialization is probably preceded by a length (it is in the KeyValueCodec at least).
       Bytes.SIZEOF_INT;
   }
@@ -722,10 +970,17 @@ public final class CellUtil {
     KeyValue.TIMESTAMP_TYPE_SIZE;
   }
 
+  /**
+   * Calculates the serialized key size. We always serialize in the KeyValue's serialization
+   * format.
+   * @param cell the cell for which the key size has to be calculated.
+   * @return the key size
+   */
   public static int estimatedSerializedSizeOfKey(final Cell cell) {
     if (cell instanceof KeyValue) return ((KeyValue)cell).getKeyLength();
-    // This will be a low estimate.  Will do for now.
-    return getSumOfCellKeyElementLengths(cell);
+    return cell.getRowLength() + cell.getFamilyLength() +
+        cell.getQualifierLength() +
+        KeyValue.KEY_INFRASTRUCTURE_SIZE;
   }
 
   /**
@@ -1413,8 +1668,8 @@ public final class CellUtil {
           ((ByteBufferedCell) right).getRowPosition(), rrowlength, left.getRowArray(),
           left.getRowOffset(), lrowlength);
     }
-    return Bytes.equals(left.getRowArray(), left.getRowOffset(), left.getRowLength(),
-        right.getRowArray(), right.getRowOffset(), right.getRowLength());
+    return Bytes.equals(left.getRowArray(), left.getRowOffset(), lrowlength,
+        right.getRowArray(), right.getRowOffset(), rrowlength);
   }
 
   /**
@@ -1510,9 +1765,27 @@ public final class CellUtil {
     return new FirstOnRowCell(row, roffset, rlength);
   }
 
+  public static Cell createFirstOnRow(final byte[] row, final byte[] family, final byte[] col) {
+    return createFirstOnRow(row, 0, (short)row.length,
+        family, 0, (byte)family.length,
+        col, 0, col.length);
+  }
+
+  public static Cell createFirstOnRow(final byte[] row, int roffset, short rlength,
+                                      final byte[] family, int foffset, byte flength,
+                                      final byte[] col, int coffset, int clength) {
+    return new FirstOnRowColCell(row, roffset, rlength,
+        family, foffset, flength,
+        col, coffset, clength);
+  }
+
+  public static Cell createFirstOnRow(final byte[] row) {
+    return createFirstOnRow(row, 0, (short)row.length);
+  }
+
   /**
    * Create a Cell that is smaller than all other possible Cells for the given Cell's row.
-   *
+   * The family length is considered to be 0
    * @param cell
    * @return First possible Cell on passed Cell's row.
    */
@@ -1597,6 +1870,10 @@ public final class CellUtil {
         ((ByteBufferedCell) cell).getRowPosition(), cell.getRowLength());
     }
     return new LastOnRowCell(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength());
+  }
+
+  public static Cell createLastOnRow(final byte[] row) {
+    return new LastOnRowCell(row, 0, (short)row.length);
   }
 
   /**
@@ -1749,7 +2026,13 @@ public final class CellUtil {
    * These cells are used in reseeks/seeks to improve the read performance.
    * They are not real cells that are returned back to the clients
    */
-  private static abstract class EmptyByteBufferedCell extends ByteBufferedCell {
+  private static abstract class EmptyByteBufferedCell extends ByteBufferedCell
+      implements SettableSequenceId {
+
+    @Override
+    public void setSequenceId(long seqId) {
+      // Fake cells don't need seqId, so leaving it as a noop.
+    }
 
     @Override
     public byte[] getRowArray() {

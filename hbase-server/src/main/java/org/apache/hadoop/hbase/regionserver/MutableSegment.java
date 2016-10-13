@@ -22,15 +22,20 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.util.ClassSize;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * A mutable segment in memstore, specifically the active segment.
  */
 @InterfaceAudience.Private
 public class MutableSegment extends Segment {
-  protected MutableSegment(CellSet cellSet, CellComparator comparator, MemStoreLAB memStoreLAB,
-      long size) {
-    super(cellSet, comparator, memStoreLAB, size);
+
+  public final static long DEEP_OVERHEAD = Segment.DEEP_OVERHEAD + ClassSize.CONCURRENT_SKIPLISTMAP;
+
+  protected MutableSegment(CellSet cellSet, CellComparator comparator, MemStoreLAB memStoreLAB) {
+    super(cellSet, comparator, memStoreLAB);
   }
 
   /**
@@ -44,51 +49,27 @@ public class MutableSegment extends Segment {
   }
 
   /**
-   * Removes the given cell from the segment
-   * @return the change in the heap size
-   */
-  public long rollback(Cell cell) {
-    Cell found = getCellSet().get(cell);
-    if (found != null && found.getSequenceId() == cell.getSequenceId()) {
-      long sz = AbstractMemStore.heapSizeChange(cell, true);
-      getCellSet().remove(cell);
-      incSize(-sz);
-      return sz;
-    }
-    return 0;
-  }
-
-  //methods for test
-
-  /**
    * Returns the first cell in the segment
    * @return the first cell in the segment
    */
+  @VisibleForTesting
   Cell first() {
     return this.getCellSet().first();
   }
 
   @Override
   public boolean shouldSeek(Scan scan, long oldestUnexpiredTS) {
-    return (getTimeRangeTracker().includesTimeRange(scan.getTimeRange())
-        && (getTimeRangeTracker().getMax() >= oldestUnexpiredTS));
+    return (this.timeRangeTracker.includesTimeRange(scan.getTimeRange())
+        && (this.timeRangeTracker.getMax() >= oldestUnexpiredTS));
   }
 
   @Override
   public long getMinTimestamp() {
-    return getTimeRangeTracker().getMin();
+    return this.timeRangeTracker.getMin();
   }
 
   @Override
-  protected void updateMetaInfo(Cell toAdd, long s) {
-    getTimeRangeTracker().includeTimestamp(toAdd);
-    size.addAndGet(s);
-    // In no tags case this NoTagsKeyValue.getTagsLength() is a cheap call.
-    // When we use ACL CP or Visibility CP which deals with Tags during
-    // mutation, the TagRewriteCell.getTagsLength() is a cheaper call. We do not
-    // parse the byte[] to identify the tags length.
-    if(toAdd.getTagsLength() > 0) {
-      tagsPresent = true;
-    }
+  public long size() {
+    return keySize() + DEEP_OVERHEAD;
   }
 }

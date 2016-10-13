@@ -42,16 +42,16 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.AuthUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.replication.ReplicationStateZKBase;
 import org.apache.hadoop.hbase.security.Superusers;
-import org.apache.hadoop.hbase.util.ByteStringer;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil.ZKUtilOp.CreateAndFailSilent;
@@ -76,8 +76,6 @@ import org.apache.zookeeper.proto.CreateRequest;
 import org.apache.zookeeper.proto.DeleteRequest;
 import org.apache.zookeeper.proto.SetDataRequest;
 import org.apache.zookeeper.server.ZooKeeperSaslServer;
-
-import com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * Internal HBase utility class for ZooKeeper.
@@ -903,7 +901,7 @@ public class ZKUtil {
 
   public static ArrayList<ACL> createACL(ZooKeeperWatcher zkw, String node,
     boolean isSecureZooKeeper) {
-    if (!node.startsWith(zkw.baseZNode)) {
+    if (!node.startsWith(zkw.znodePaths.baseZNode)) {
       return Ids.OPEN_ACL_UNSAFE;
     }
     if (isSecureZooKeeper) {
@@ -1285,9 +1283,6 @@ public class ZKUtil {
    * Sets no watches.  Throws all exceptions besides dealing with deletion of
    * children.
    *
-   * If hbase.zookeeper.useMulti is true, use ZooKeeper's multi-update functionality.
-   * Otherwise, run the list of operations sequentially.
-   *
    * @throws KeeperException
    */
   public static void deleteChildrenRecursively(ZooKeeperWatcher zkw, String node)
@@ -1304,13 +1299,9 @@ public class ZKUtil {
    * Sets no watches. Throws all exceptions besides dealing with deletion of
    * children.
    * <p>
-   * If hbase.zookeeper.useMulti is true, use ZooKeeper's multi-update
-   * functionality. Otherwise, run the list of operations sequentially.
-   * <p>
-   * If all of the following are true:
+   * If the following is true:
    * <ul>
    * <li>runSequentialOnMultiFailure is true
-   * <li>hbase.zookeeper.useMulti is true
    * </ul>
    * on calling multi, we get a ZooKeeper exception that can be handled by a
    * sequential call(*), we retry the operations one-by-one (sequentially).
@@ -1359,13 +1350,9 @@ public class ZKUtil {
    * Sets no watches. Throws all exceptions besides dealing with deletion of
    * children.
    * <p>
-   * If hbase.zookeeper.useMulti is true, use ZooKeeper's multi-update
-   * functionality. Otherwise, run the list of operations sequentially.
-   * <p>
-   * If all of the following are true:
+   * If the following is true:
    * <ul>
    * <li>runSequentialOnMultiFailure is true
-   * <li>hbase.zookeeper.useMulti is true
    * </ul>
    * on calling multi, we get a ZooKeeper exception that can be handled by a
    * sequential call(*), we retry the operations one-by-one (sequentially).
@@ -1636,12 +1623,10 @@ public class ZKUtil {
   }
 
   /**
-   * If hbase.zookeeper.useMulti is true, use ZooKeeper's multi-update functionality.
-   * Otherwise, run the list of operations sequentially.
+   * Use ZooKeeper's multi-update functionality.
    *
    * If all of the following are true:
    * - runSequentialOnMultiFailure is true
-   * - hbase.zookeeper.useMulti is true
    * - on calling multi, we get a ZooKeeper exception that can be handled by a sequential call(*)
    * Then:
    * - we retry the operations one-by-one (sequentially)
@@ -1658,42 +1643,38 @@ public class ZKUtil {
    */
   public static void multiOrSequential(ZooKeeperWatcher zkw, List<ZKUtilOp> ops,
       boolean runSequentialOnMultiFailure) throws KeeperException {
-    if (ops == null) return;
-    boolean useMulti = zkw.getConfiguration().getBoolean(HConstants.ZOOKEEPER_USEMULTI, false);
-
-    if (useMulti) {
-      List<Op> zkOps = new LinkedList<Op>();
-      for (ZKUtilOp op : ops) {
-        zkOps.add(toZooKeeperOp(zkw, op));
-      }
-      try {
-        zkw.getRecoverableZooKeeper().multi(zkOps);
-      } catch (KeeperException ke) {
-       switch (ke.code()) {
-         case NODEEXISTS:
-         case NONODE:
-         case BADVERSION:
-         case NOAUTH:
-           // if we get an exception that could be solved by running sequentially
-           // (and the client asked us to), then break out and run sequentially
-           if (runSequentialOnMultiFailure) {
-             LOG.info("On call to ZK.multi, received exception: " + ke.toString() + "."
-               + "  Attempting to run operations sequentially because"
-               + " runSequentialOnMultiFailure is: " + runSequentialOnMultiFailure + ".");
-             processSequentially(zkw, ops);
-             break;
-           }
-          default:
-            throw ke;
-        }
-      } catch (InterruptedException ie) {
-        zkw.interruptedException(ie);
-      }
-    } else {
-      // run sequentially
-      processSequentially(zkw, ops);
+    if (zkw.getConfiguration().get("hbase.zookeeper.useMulti") != null) {
+      LOG.warn("hbase.zookeeper.useMulti is deprecated. Default to true always.");
     }
+    if (ops == null) return;
 
+    List<Op> zkOps = new LinkedList<Op>();
+    for (ZKUtilOp op : ops) {
+      zkOps.add(toZooKeeperOp(zkw, op));
+    }
+    try {
+      zkw.getRecoverableZooKeeper().multi(zkOps);
+    } catch (KeeperException ke) {
+      switch (ke.code()) {
+      case NODEEXISTS:
+      case NONODE:
+      case BADVERSION:
+      case NOAUTH:
+        // if we get an exception that could be solved by running sequentially
+        // (and the client asked us to), then break out and run sequentially
+        if (runSequentialOnMultiFailure) {
+          LOG.info("On call to ZK.multi, received exception: " + ke.toString() + "."
+              + "  Attempting to run operations sequentially because"
+              + " runSequentialOnMultiFailure is: " + runSequentialOnMultiFailure + ".");
+          processSequentially(zkw, ops);
+          break;
+        }
+      default:
+        throw ke;
+      }
+    } catch (InterruptedException ie) {
+      zkw.interruptedException(ie);
+    }
   }
 
   private static void processSequentially(ZooKeeperWatcher zkw, List<ZKUtilOp> ops)
@@ -1720,7 +1701,7 @@ public class ZKUtil {
   public static String dump(ZooKeeperWatcher zkw) {
     StringBuilder sb = new StringBuilder();
     try {
-      sb.append("HBase is rooted at ").append(zkw.baseZNode);
+      sb.append("HBase is rooted at ").append(zkw.znodePaths.baseZNode);
       sb.append("\nActive master address: ");
       try {
         sb.append(MasterAddressTracker.getMasterAddress(zkw));
@@ -1728,8 +1709,7 @@ public class ZKUtil {
         sb.append("<<FAILED LOOKUP: " + e.getMessage() + ">>");
       }
       sb.append("\nBackup master addresses:");
-      for (String child : listChildrenNoWatch(zkw,
-                                              zkw.backupMasterAddressesZNode)) {
+      for (String child : listChildrenNoWatch(zkw, zkw.znodePaths.backupMasterAddressesZNode)) {
         sb.append("\n ").append(child);
       }
       sb.append("\nRegion server holding hbase:meta: "
@@ -1742,7 +1722,7 @@ public class ZKUtil {
                     + new MetaTableLocator().getMetaRegionLocation(zkw, i));
       }
       sb.append("\nRegion servers:");
-      for (String child : listChildrenNoWatch(zkw, zkw.rsZNode)) {
+      for (String child : listChildrenNoWatch(zkw, zkw.znodePaths.rsZNode)) {
         sb.append("\n ").append(child);
       }
       try {
@@ -1786,7 +1766,7 @@ public class ZKUtil {
       throws KeeperException {
     String replicationZNodeName = zkw.getConfiguration().get("zookeeper.znode.replication",
       "replication");
-    String replicationZnode = joinZNode(zkw.baseZNode, replicationZNodeName);
+    String replicationZnode = joinZNode(zkw.znodePaths.baseZNode, replicationZNodeName);
     if (ZKUtil.checkExists(zkw, replicationZnode) == -1) return;
     // do a ls -r on this znode
     sb.append("\n").append(replicationZnode).append(": ");
@@ -1821,6 +1801,17 @@ public class ZKUtil {
         }
       }
     }
+  }
+
+  /**
+   * Returns a string with replication znodes and position of the replication log
+   * @param zkw
+   * @return aq string of replication znodes and log positions
+   */
+  public static String getReplicationZnodesDump(ZooKeeperWatcher zkw) throws KeeperException {
+    StringBuilder sb = new StringBuilder();
+    getReplicationZnodesDump(zkw, sb);
+    return sb.toString();
   }
 
   private static void appendRSZnodes(ZooKeeperWatcher zkw, String znode, StringBuilder sb)
@@ -1956,16 +1947,16 @@ public class ZKUtil {
       " byte(s) of data from znode " + znode +
       (watcherSet? " and set watcher; ": "; data=") +
       (data == null? "null": data.length == 0? "empty": (
-          znode.startsWith(ZooKeeperWatcher.META_ZNODE_PREFIX)?
+          znode.startsWith(zkw.znodePaths.metaZNodePrefix)?
             getServerNameOrEmptyString(data):
-          znode.startsWith(zkw.backupMasterAddressesZNode)?
+          znode.startsWith(zkw.znodePaths.backupMasterAddressesZNode)?
             getServerNameOrEmptyString(data):
           StringUtils.abbreviate(Bytes.toStringBinary(data), 32)))));
   }
 
   private static String getServerNameOrEmptyString(final byte [] data) {
     try {
-      return ServerName.parseFrom(data).toString();
+      return ProtobufUtil.parseServerNameFrom(data).toString();
     } catch (DeserializationException e) {
       return "";
     }
@@ -2114,7 +2105,7 @@ public class ZKUtil {
       for (Map.Entry<byte[], Long> e : storeSequenceIds.entrySet()){
         byte[] columnFamilyName = e.getKey();
         Long curSeqId = e.getValue();
-        storeSequenceIdBuilder.setFamilyName(ByteStringer.wrap(columnFamilyName));
+        storeSequenceIdBuilder.setFamilyName(UnsafeByteOperations.unsafeWrap(columnFamilyName));
         storeSequenceIdBuilder.setSequenceId(curSeqId);
         regionSequenceIdsBuilder.addStoreSequenceId(storeSequenceIdBuilder.build());
         storeSequenceIdBuilder.clear();

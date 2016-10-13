@@ -44,8 +44,8 @@ import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotManager;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.client.SnapshotDescription;
 import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -325,8 +325,8 @@ public class TestFlushSnapshotFromClient {
     int numRegionsAfterMerge = numRegions - 2;
     admin.mergeRegionsAsync(regions.get(1).getEncodedNameAsBytes(),
         regions.get(2).getEncodedNameAsBytes(), true);
-    admin.mergeRegionsAsync(regions.get(5).getEncodedNameAsBytes(),
-        regions.get(6).getEncodedNameAsBytes(), true);
+    admin.mergeRegionsAsync(regions.get(4).getEncodedNameAsBytes(),
+        regions.get(5).getEncodedNameAsBytes(), true);
 
     // Verify that there's one region less
     waitRegionsAfterMerge(numRegionsAfterMerge);
@@ -366,8 +366,8 @@ public class TestFlushSnapshotFromClient {
     int numRegionsAfterMerge = numRegions - 2;
     admin.mergeRegionsAsync(regions.get(1).getEncodedNameAsBytes(),
         regions.get(2).getEncodedNameAsBytes(), true);
-    admin.mergeRegionsAsync(regions.get(5).getEncodedNameAsBytes(),
-        regions.get(6).getEncodedNameAsBytes(), true);
+    admin.mergeRegionsAsync(regions.get(4).getEncodedNameAsBytes(),
+        regions.get(5).getEncodedNameAsBytes(), true);
 
     waitRegionsAfterMerge(numRegionsAfterMerge);
     assertEquals(numRegionsAfterMerge, admin.getTableRegions(TABLE_NAME).size());

@@ -46,9 +46,9 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.BulkLoadDescriptor;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.StoreDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.BulkLoadDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.StoreDescriptor;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -273,7 +273,7 @@ public class TestBulkLoad {
     HFile.WriterFactory hFileFactory = HFile.getWriterFactoryNoCache(conf);
     // TODO We need a way to do this without creating files
     File hFileLocation = testFolder.newFile();
-    FSDataOutputStream out = new FSDataOutputStream(new FileOutputStream(hFileLocation));
+    FSDataOutputStream out = new FSDataOutputStream(new FileOutputStream(hFileLocation), null);
     try {
       hFileFactory.withOutputStream(out);
       hFileFactory.withFileContext(new HFileContext());

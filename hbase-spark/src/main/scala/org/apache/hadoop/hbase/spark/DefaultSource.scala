@@ -26,7 +26,11 @@ import org.apache.hadoop.hbase.mapred.TableOutputFormat
 import org.apache.hadoop.hbase.spark.datasources._
 import org.apache.hadoop.hbase.types._
 import org.apache.hadoop.hbase.util.{Bytes, PositionedByteRange, SimplePositionedMutableByteRange}
-import org.apache.hadoop.hbase._
+import org.apache.hadoop.hbase.HBaseConfiguration
+import org.apache.hadoop.hbase.HTableDescriptor
+import org.apache.hadoop.hbase.HColumnDescriptor
+import org.apache.hadoop.hbase.TableName
+import org.apache.hadoop.hbase.CellUtil
 import org.apache.hadoop.mapred.JobConf
 import org.apache.spark.Logging
 import org.apache.spark.rdd.RDD
@@ -151,9 +155,10 @@ case class HBaseRelation (
     if (numReg > 3) {
       val tName = TableName.valueOf(catalog.name)
       val cfs = catalog.getColumnFamilies
-      val connection = ConnectionFactory.createConnection(hbaseConf)
+
+      val connection = HBaseConnectionCache.getConnection(hbaseConf)
       // Initialize hBase table if necessary
-      val admin = connection.getAdmin()
+      val admin = connection.getAdmin
       try {
         if (!admin.isTableAvailable(tName)) {
           val tableDesc = new HTableDescriptor(tName)

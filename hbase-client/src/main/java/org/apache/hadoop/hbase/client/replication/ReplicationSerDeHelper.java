@@ -18,26 +18,30 @@
  */
 package org.apache.hadoop.hbase.client.replication;
 
-import com.google.protobuf.ByteString;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Strings;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Set;
 
 /**
  * Helper for TableCFs Operations.
@@ -49,6 +53,13 @@ public final class ReplicationSerDeHelper {
   private static final Log LOG = LogFactory.getLog(ReplicationSerDeHelper.class);
 
   private ReplicationSerDeHelper() {}
+
+  public static String convertToString(Set<String> namespaces) {
+    if (namespaces == null) {
+      return null;
+    }
+    return StringUtils.join(namespaces, ';');
+  }
 
   /** convert map to TableCFs Object */
   public static ZooKeeperProtos.TableCF[] convert(
@@ -262,10 +273,19 @@ public final class ReplicationSerDeHelper {
     for (HBaseProtos.NameStringPair pair : peer.getConfigurationList()) {
       peerConfig.getConfiguration().put(pair.getName(), pair.getValue());
     }
+
     Map<TableName, ? extends Collection<String>> tableCFsMap = convert2Map(
       peer.getTableCfsList().toArray(new ZooKeeperProtos.TableCF[peer.getTableCfsCount()]));
     if (tableCFsMap != null) {
       peerConfig.setTableCFsMap(tableCFsMap);
+    }
+    List<ByteString> namespacesList = peer.getNamespacesList();
+    if (namespacesList != null && namespacesList.size() != 0) {
+      Set<String> namespaces = new HashSet<String>();
+      for (ByteString namespace : namespacesList) {
+        namespaces.add(namespace.toStringUtf8());
+      }
+      peerConfig.setNamespaces(namespaces);
     }
     return peerConfig;
   }
@@ -281,8 +301,8 @@ public final class ReplicationSerDeHelper {
 
     for (Map.Entry<byte[], byte[]> entry : peerConfig.getPeerData().entrySet()) {
       builder.addData(HBaseProtos.BytesBytesPair.newBuilder()
-          .setFirst(ByteString.copyFrom(entry.getKey()))
-          .setSecond(ByteString.copyFrom(entry.getValue()))
+          .setFirst(UnsafeByteOperations.unsafeWrap(entry.getKey()))
+          .setSecond(UnsafeByteOperations.unsafeWrap(entry.getValue()))
           .build());
     }
 
@@ -292,12 +312,20 @@ public final class ReplicationSerDeHelper {
           .setValue(entry.getValue())
           .build());
     }
+
     ZooKeeperProtos.TableCF[] tableCFs = convert(peerConfig.getTableCFsMap());
     if (tableCFs != null) {
       for (int i = 0; i < tableCFs.length; i++) {
         builder.addTableCfs(tableCFs[i]);
       }
     }
+    Set<String> namespaces = peerConfig.getNamespaces();
+    if (namespaces != null) {
+      for (String namespace : namespaces) {
+        builder.addNamespaces(ByteString.copyFromUtf8(namespace));
+      }
+    }
+
     return builder.build();
   }
 
@@ -311,5 +339,4 @@ public final class ReplicationSerDeHelper {
     byte[] bytes = convert(peerConfig).toByteArray();
     return ProtobufUtil.prependPBMagic(bytes);
   }
-
 }

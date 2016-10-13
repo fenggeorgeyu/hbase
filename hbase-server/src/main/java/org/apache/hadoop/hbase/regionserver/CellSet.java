@@ -18,12 +18,13 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.NavigableSet;
+import java.util.NavigableMap;
 import java.util.SortedSet;
-import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 import org.apache.hadoop.hbase.Cell;
@@ -44,14 +45,19 @@ public class CellSet implements NavigableSet<Cell>  {
   // is not already present.", this implementation "Adds the specified element to this set EVEN
   // if it is already present overwriting what was there previous".
   // Otherwise, has same attributes as ConcurrentSkipListSet
-  private final ConcurrentNavigableMap<Cell, Cell> delegatee;
+  private final NavigableMap<Cell, Cell> delegatee; ///
 
   CellSet(final CellComparator c) {
     this.delegatee = new ConcurrentSkipListMap<Cell, Cell>(c);
   }
 
-  CellSet(final ConcurrentNavigableMap<Cell, Cell> m) {
+  CellSet(final NavigableMap<Cell, Cell> m) {
     this.delegatee = m;
+  }
+
+  @VisibleForTesting
+  NavigableMap<Cell, Cell> getDelegatee() {
+    return delegatee;
   }
 
   public Cell ceiling(Cell e) {

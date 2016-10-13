@@ -22,6 +22,7 @@ import java.util.List;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
 import org.apache.hadoop.hbase.io.HeapSize;
 
 /**
@@ -71,6 +72,13 @@ public interface MemStore extends HeapSize {
    * @return approximate size of the passed cell.
    */
   long add(final Cell cell);
+
+  /**
+   * Write the updates
+   * @param cells
+   * @return approximate size of the passed cell.
+   */
+  long add(Iterable<Cell> cells);
 
   /**
    * @return Oldest timestamp of all the Cells in the MemStore
@@ -125,7 +133,11 @@ public interface MemStore extends HeapSize {
   List<KeyValueScanner> getScanners(long readPt) throws IOException;
 
   /**
-   * @return Total memory occupied by this MemStore.
+   * @return Total memory occupied by this MemStore. This includes active segment size and heap size
+   *         overhead of this memstore but won't include any size occupied by the snapshot. We
+   *         assume the snapshot will get cleared soon. This is not thread safe and the memstore may
+   *         be changed while computing its size. It is the responsibility of the caller to make
+   *         sure this doesn't happen.
    */
   long size();
 

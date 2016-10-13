@@ -18,19 +18,17 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
@@ -39,6 +37,7 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionDispatcher;
@@ -47,26 +46,21 @@ import org.apache.hadoop.hbase.master.MetricsSnapshot;
 import org.apache.hadoop.hbase.master.RegionStates;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.RestoreSnapshotState;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RestoreSnapshotState;
 import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.RestoreSnapshotHelper;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.security.UserGroupInformation;
 
 @InterfaceAudience.Private
 public class RestoreSnapshotProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, RestoreSnapshotState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineTableProcedure<RestoreSnapshotState> {
   private static final Log LOG = LogFactory.getLog(RestoreSnapshotProcedure.class);
-
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
 
   private HTableDescriptor modifiedHTableDescriptor;
   private List<HRegionInfo> regionsToRestore = null;
@@ -75,7 +69,6 @@ public class RestoreSnapshotProcedure
   private Map<String, Pair<String, String>> parentsToChildrenPairMap =
     new HashMap<String, Pair<String, String>>();
 
-  private UserGroupInformation user;
   private SnapshotDescription snapshot;
 
   // Monitor
@@ -99,15 +92,12 @@ public class RestoreSnapshotProcedure
   public RestoreSnapshotProcedure(
       final MasterProcedureEnv env,
       final HTableDescriptor hTableDescriptor,
-      final SnapshotDescription snapshot)
-      throws IOException {
+      final SnapshotDescription snapshot) {
+    super(env);
     // This is the new schema we are going to write out as this modification.
     this.modifiedHTableDescriptor = hTableDescriptor;
     // Snapshot information
     this.snapshot = snapshot;
-    // User and owner information
-    this.user = env.getRequestUser().getUGI();
-    this.setOwner(this.user.getShortUserName());
 
     // Monitor
     getMonitorStatus();
@@ -156,8 +146,12 @@ public class RestoreSnapshotProcedure
           throw new UnsupportedOperationException("unhandled state=" + state);
       }
     } catch (IOException e) {
-      LOG.error("Error trying to restore snapshot=" + getTableName() + " state=" + state, e);
-      setFailure("master-restore-snapshot", e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-restore-snapshot", e);
+      } else {
+        LOG.warn("Retriable error trying to restore snapshot=" + snapshot.getName() +
+          " to table=" + getTableName() + " (in state=" + state + ")", e);
+      }
     }
     return Flow.HAS_MORE_STATE;
   }
@@ -165,10 +159,6 @@ public class RestoreSnapshotProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final RestoreSnapshotState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
-    }
-
     if (state == RestoreSnapshotState.RESTORE_SNAPSHOT_PRE_OPERATION) {
       // nothing to rollback
       return;
@@ -176,6 +166,16 @@ public class RestoreSnapshotProcedure
 
     // The restore snapshot doesn't have a rollback. The execution will succeed, at some point.
     throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final RestoreSnapshotState state) {
+    switch (state) {
+      case RESTORE_SNAPSHOT_PRE_OPERATION:
+        return true;
+      default:
+        return false;
+    }
   }
 
   @Override
@@ -194,15 +194,6 @@ public class RestoreSnapshotProcedure
   }
 
   @Override
-  protected void setNextState(final RestoreSnapshotState state) {
-    if (aborted.get()) {
-      setAbortFailure("create-table", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
   public TableName getTableName() {
     return modifiedHTableDescriptor.getTableName();
   }
@@ -214,8 +205,8 @@ public class RestoreSnapshotProcedure
 
   @Override
   public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
+    // TODO: We may be able to abort if the procedure is not started yet.
+    return false;
   }
 
   @Override
@@ -234,7 +225,7 @@ public class RestoreSnapshotProcedure
 
     MasterProcedureProtos.RestoreSnapshotStateData.Builder restoreSnapshotMsg =
       MasterProcedureProtos.RestoreSnapshotStateData.newBuilder()
-        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(this.user))
+        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
         .setSnapshot(this.snapshot)
         .setModifiedTableSchema(ProtobufUtil.convertToTableSchema(modifiedHTableDescriptor));
 
@@ -276,7 +267,7 @@ public class RestoreSnapshotProcedure
 
     MasterProcedureProtos.RestoreSnapshotStateData restoreSnapshotMsg =
       MasterProcedureProtos.RestoreSnapshotStateData.parseDelimitedFrom(stream);
-    user = MasterProcedureUtil.toUserInfo(restoreSnapshotMsg.getUserInfo());
+    setUser(MasterProcedureUtil.toUserInfo(restoreSnapshotMsg.getUserInfo()));
     snapshot = restoreSnapshotMsg.getSnapshot();
     modifiedHTableDescriptor =
       ProtobufUtil.convertToHTableDesc(restoreSnapshotMsg.getModifiedTableSchema());
@@ -317,19 +308,6 @@ public class RestoreSnapshotProcedure
             parentToChildrenPair.getChild2RegionName()));
       }
     }
-  }
-
-  @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) {
-      return false;
-    }
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, getTableName());
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, getTableName());
   }
 
   /**

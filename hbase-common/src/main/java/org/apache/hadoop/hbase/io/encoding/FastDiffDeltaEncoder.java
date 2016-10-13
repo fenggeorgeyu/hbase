@@ -378,7 +378,8 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
     private int rowLengthWithSize;
     private int familyLengthWithSize;
 
-    public FastDiffSeekerState(ObjectIntPair<ByteBuffer> tmpPair, boolean includeTags) {
+    public FastDiffSeekerState(ObjectIntPair<ByteBuffer> tmpPair,
+        boolean includeTags) {
       super(tmpPair, includeTags);
     }
 

@@ -40,7 +40,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
@@ -100,16 +100,10 @@ public class MasterWalManager {
     this.conf = conf;
     this.rootDir = rootDir;
     this.services = services;
-    this.splitLogManager = new SplitLogManager(services, conf,
-        services, services, services.getServerName());
+    this.splitLogManager = new SplitLogManager(services, conf);
     this.distributedLogReplay = this.splitLogManager.isLogReplaying();
 
     this.oldLogDir = new Path(rootDir, HConstants.HREGION_OLDLOGDIR_NAME);
-
-    // Make sure the region servers can archive their old logs
-    if (!this.fs.exists(oldLogDir)) {
-      this.fs.mkdirs(oldLogDir);
-    }
   }
 
   public void stop() {

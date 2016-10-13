@@ -37,7 +37,6 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ScheduledChore;
-import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.backup.HFileArchiver;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
@@ -58,18 +57,17 @@ import org.apache.hadoop.hbase.util.Triple;
 @InterfaceAudience.Private
 public class CatalogJanitor extends ScheduledChore {
   private static final Log LOG = LogFactory.getLog(CatalogJanitor.class.getName());
-  private final Server server;
+
+  private final AtomicBoolean alreadyRunning = new AtomicBoolean(false);
+  private final AtomicBoolean enabled = new AtomicBoolean(true);
   private final MasterServices services;
-  private AtomicBoolean enabled = new AtomicBoolean(true);
-  private AtomicBoolean alreadyRunning = new AtomicBoolean(false);
   private final Connection connection;
 
-  CatalogJanitor(final Server server, final MasterServices services) {
-    super("CatalogJanitor-" + server.getServerName().toShortString(), server, server
-        .getConfiguration().getInt("hbase.catalogjanitor.interval", 300000));
-    this.server = server;
+  CatalogJanitor(final MasterServices services) {
+    super("CatalogJanitor-" + services.getServerName().toShortString(), services,
+      services.getConfiguration().getInt("hbase.catalogjanitor.interval", 300000));
     this.services = services;
-    this.connection = server.getConnection();
+    this.connection = services.getConnection();
   }
 
   @Override
@@ -109,6 +107,7 @@ public class CatalogJanitor extends ScheduledChore {
     try {
       AssignmentManager am = this.services.getAssignmentManager();
       if (this.enabled.get()
+          && !this.services.isInMaintenanceMode()
           && am != null
           && am.isFailoverCleanupDone()
           && am.getRegionStates().getRegionsInTransition().size() == 0) {
@@ -213,8 +212,9 @@ public class CatalogJanitor extends ScheduledChore {
           + " from fs because merged region no longer holds references");
       HFileArchiver.archiveRegion(this.services.getConfiguration(), fs, regionA);
       HFileArchiver.archiveRegion(this.services.getConfiguration(), fs, regionB);
-      MetaTableAccessor.deleteMergeQualifiers(server.getConnection(),
-        mergedRegion);
+      MetaTableAccessor.deleteMergeQualifiers(services.getConnection(), mergedRegion);
+      services.getServerManager().removeRegion(regionA);
+      services.getServerManager().removeRegion(regionB);
       return true;
     }
     return false;
@@ -241,6 +241,11 @@ public class CatalogJanitor extends ScheduledChore {
       int mergeCleaned = 0;
       Map<HRegionInfo, Result> mergedRegions = scanTriple.getSecond();
       for (Map.Entry<HRegionInfo, Result> e : mergedRegions.entrySet()) {
+        if (this.services.isInMaintenanceMode()) {
+          // Stop cleaning if the master is in maintenance mode
+          break;
+        }
+
         PairOfSameType<HRegionInfo> p = MetaTableAccessor.getMergeRegions(e.getValue());
         HRegionInfo regionA = p.getFirst();
         HRegionInfo regionB = p.getSecond();
@@ -266,6 +271,11 @@ public class CatalogJanitor extends ScheduledChore {
       // regions whose parents are still around
       HashSet<String> parentNotCleaned = new HashSet<String>();
       for (Map.Entry<HRegionInfo, Result> e : splitParents.entrySet()) {
+        if (this.services.isInMaintenanceMode()) {
+          // Stop cleaning if the master is in maintenance mode
+          break;
+        }
+
         if (!parentNotCleaned.contains(e.getKey().getEncodedName()) &&
             cleanParent(e.getKey(), e.getValue())) {
           splitCleaned++;
@@ -349,6 +359,7 @@ public class CatalogJanitor extends ScheduledChore {
       if (LOG.isTraceEnabled()) LOG.trace("Archiving parent region: " + parent);
       HFileArchiver.archiveRegion(this.services.getConfiguration(), fs, parent);
       MetaTableAccessor.deleteRegion(this.connection, parent);
+      services.getServerManager().removeRegion(parent);
       result = true;
     }
     return result;
@@ -393,26 +404,26 @@ public class CatalogJanitor extends ScheduledChore {
         return new Pair<Boolean, Boolean>(Boolean.FALSE, Boolean.FALSE);
       }
     } catch (IOException ioe) {
-      LOG.warn("Error trying to determine if daughter region exists, " +
+      LOG.error("Error trying to determine if daughter region exists, " +
                "assuming exists and has references", ioe);
-      return new Pair<Boolean, Boolean>(Boolean.TRUE, Boolean.TRUE);
-    }
-
-    try {
-      regionFs = HRegionFileSystem.openRegionFromFileSystem(
-          this.services.getConfiguration(), fs, tabledir, daughter, true);
-    } catch (IOException e) {
-      LOG.warn("Error trying to determine referenced files from : " + daughter.getEncodedName()
-          + ", to: " + parent.getEncodedName() + " assuming has references", e);
       return new Pair<Boolean, Boolean>(Boolean.TRUE, Boolean.TRUE);
     }
 
     boolean references = false;
     HTableDescriptor parentDescriptor = getTableDescriptor(parent.getTable());
-    for (HColumnDescriptor family: parentDescriptor.getFamilies()) {
-      if ((references = regionFs.hasReferences(family.getNameAsString()))) {
-        break;
+    try {
+      regionFs = HRegionFileSystem.openRegionFromFileSystem(
+          this.services.getConfiguration(), fs, tabledir, daughter, true);
+
+      for (HColumnDescriptor family: parentDescriptor.getFamilies()) {
+        if ((references = regionFs.hasReferences(family.getNameAsString()))) {
+          break;
+        }
       }
+    } catch (IOException e) {
+      LOG.error("Error trying to determine referenced files from : " + daughter.getEncodedName()
+          + ", to: " + parent.getEncodedName() + " assuming has references", e);
+      return new Pair<Boolean, Boolean>(Boolean.TRUE, Boolean.TRUE);
     }
     return new Pair<Boolean, Boolean>(Boolean.TRUE, Boolean.valueOf(references));
   }

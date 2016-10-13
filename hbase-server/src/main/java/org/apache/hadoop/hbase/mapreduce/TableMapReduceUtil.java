@@ -18,8 +18,21 @@
  */
 package org.apache.hadoop.hbase.mapreduce;
 
-import com.google.protobuf.InvalidProtocolBufferException;
-import com.codahale.metrics.MetricRegistry;
+import java.io.File;
+import java.io.IOException;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -36,8 +49,8 @@ import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.security.token.TokenUtil;
@@ -49,20 +62,7 @@ import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.util.StringUtils;
 
-import java.io.File;
-import java.io.IOException;
-import java.net.URL;
-import java.net.URLDecoder;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+import com.codahale.metrics.MetricRegistry;
 
 /**
  * Utility for {@link TableMapper} and {@link TableReducer}
@@ -339,7 +339,7 @@ public class TableMapReduceUtil {
 
     if (addDependencyJars) {
       addDependencyJars(job);
-      addDependencyJars(job.getConfiguration(), MetricRegistry.class);
+      addDependencyJarsForClasses(job.getConfiguration(), MetricRegistry.class);
     }
 
     resetCacheConfig(job.getConfiguration());
@@ -575,14 +575,7 @@ public class TableMapReduceUtil {
    */
   public static Scan convertStringToScan(String base64) throws IOException {
     byte [] decoded = Base64.decode(base64);
-    ClientProtos.Scan scan;
-    try {
-      scan = ClientProtos.Scan.parseFrom(decoded);
-    } catch (InvalidProtocolBufferException ipbe) {
-      throw new IOException(ipbe);
-    }
-
-    return ProtobufUtil.toScan(scan);
+    return ProtobufUtil.toScan(ClientProtos.Scan.parseFrom(decoded));
   }
 
   /**
@@ -780,14 +773,14 @@ public class TableMapReduceUtil {
     Class prefixTreeCodecClass = null;
     try {
       prefixTreeCodecClass =
-          Class.forName("org.apache.hadoop.hbase.code.prefixtree.PrefixTreeCodec");
+          Class.forName("org.apache.hadoop.hbase.codec.prefixtree.PrefixTreeCodec");
     } catch (ClassNotFoundException e) {
       // this will show up in unit tests but should not show in real deployments
       LOG.warn("The hbase-prefix-tree module jar containing PrefixTreeCodec is not present." +
           "  Continuing without it.");
     }
 
-    addDependencyJars(conf,
+    addDependencyJarsForClasses(conf,
       // explicitly pull a class from each module
       org.apache.hadoop.hbase.HConstants.class,                      // hbase-common
       org.apache.hadoop.hbase.protobuf.generated.ClientProtos.class, // hbase-protocol
@@ -835,7 +828,7 @@ public class TableMapReduceUtil {
   public static void addDependencyJars(Job job) throws IOException {
     addHBaseDependencyJars(job.getConfiguration());
     try {
-      addDependencyJars(job.getConfiguration(),
+      addDependencyJarsForClasses(job.getConfiguration(),
           // when making changes here, consider also mapred.TableMapReduceUtil
           // pull job classes
           job.getMapOutputKeyClass(),
@@ -855,8 +848,32 @@ public class TableMapReduceUtil {
    * Add the jars containing the given classes to the job's configuration
    * such that JobClient will ship them to the cluster and add them to
    * the DistributedCache.
+   * @deprecated rely on {@link #addDependencyJars(Job)} instead.
    */
+  @Deprecated
   public static void addDependencyJars(Configuration conf,
+      Class<?>... classes) throws IOException {
+    LOG.warn("The addDependencyJars(Configuration, Class<?>...) method has been deprecated since it"
+             + " is easy to use incorrectly. Most users should rely on addDependencyJars(Job) " +
+             "instead. See HBASE-8386 for more details.");
+    addDependencyJarsForClasses(conf, classes);
+  }
+
+  /**
+   * Add the jars containing the given classes to the job's configuration
+   * such that JobClient will ship them to the cluster and add them to
+   * the DistributedCache.
+   *
+   * N.B. that this method at most adds one jar per class given. If there is more than one
+   * jar available containing a class with the same name as a given class, we don't define
+   * which of those jars might be chosen.
+   *
+   * @param conf The Hadoop Configuration to modify
+   * @param classes will add just those dependencies needed to find the given classes
+   * @throws IOException if an underlying library call fails.
+   */
+  @InterfaceAudience.Private
+  public static void addDependencyJarsForClasses(Configuration conf,
       Class<?>... classes) throws IOException {
 
     FileSystem localFs = FileSystem.getLocal(conf);

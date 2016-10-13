@@ -73,6 +73,11 @@ public class MockNoopMasterServices implements MasterServices, Server {
   }
 
   @Override
+  public long createSystemTable(final HTableDescriptor hTableDescriptor) throws IOException {
+    return -1;
+  }
+
+  @Override
   public AssignmentManager getAssignmentManager() {
     return null;
   }
@@ -172,6 +177,11 @@ public class MockNoopMasterServices implements MasterServices, Server {
   @Override
   public void stop(String why) {
     stopped = true;
+  }
+
+  @Override
+  public boolean isStopping() {
+    return stopped;
   }
 
   @Override
@@ -303,6 +313,11 @@ public class MockNoopMasterServices implements MasterServices, Server {
 
   @Override
   public boolean isInitialized() {
+    return false;
+  }
+
+  @Override
+  public boolean isInMaintenanceMode() {
     return false;
   }
 

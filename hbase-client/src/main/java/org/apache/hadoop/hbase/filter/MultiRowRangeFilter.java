@@ -25,15 +25,13 @@ import java.util.List;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.generated.FilterProtos;
-import org.apache.hadoop.hbase.util.ByteStringer;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.FilterProtos;
 import org.apache.hadoop.hbase.util.Bytes;
-
-import com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * Filter to support scan multiple row key ranges. It can construct the row key ranges from the
@@ -85,6 +83,7 @@ public class MultiRowRangeFilter extends FilterBase {
 
   @Override
   public boolean filterRowKey(Cell firstRowCell) {
+    if (filterAllRemaining()) return true;
     // If it is the first time of running, calculate the current range index for
     // the row key. If index is out of bound which happens when the start row
     // user sets is after the largest stop row of the ranges, stop the scan.
@@ -137,7 +136,8 @@ public class MultiRowRangeFilter extends FilterBase {
   @Override
   public Cell getNextCellHint(Cell currentKV) {
     // skip to the next range's start row
-    return KeyValueUtil.createFirstOnRow(range.startRow);
+    return CellUtil.createFirstOnRow(range.startRow, 0,
+        (short) range.startRow.length);
   }
 
   /**
@@ -150,10 +150,10 @@ public class MultiRowRangeFilter extends FilterBase {
       if (range != null) {
         FilterProtos.RowRange.Builder rangebuilder = FilterProtos.RowRange.newBuilder();
         if (range.startRow != null)
-          rangebuilder.setStartRow(ByteStringer.wrap(range.startRow));
+          rangebuilder.setStartRow(UnsafeByteOperations.unsafeWrap(range.startRow));
         rangebuilder.setStartRowInclusive(range.startRowInclusive);
         if (range.stopRow != null)
-          rangebuilder.setStopRow(ByteStringer.wrap(range.stopRow));
+          rangebuilder.setStopRow(UnsafeByteOperations.unsafeWrap(range.stopRow));
         rangebuilder.setStopRowInclusive(range.stopRowInclusive);
         range.isScan = Bytes.equals(range.startRow, range.stopRow) ? 1 : 0;
         builder.addRowRangeList(rangebuilder.build());

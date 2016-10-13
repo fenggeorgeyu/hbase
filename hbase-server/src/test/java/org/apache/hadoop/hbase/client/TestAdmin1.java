@@ -30,6 +30,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
@@ -51,10 +53,10 @@ import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.exceptions.MergeRegionException;
 import org.apache.hadoop.hbase.master.HMaster;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.RequestConverter;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.DispatchMergingRegionsRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.DispatchMergingRegionsRequest;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
@@ -69,8 +71,6 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import com.google.protobuf.ServiceException;
 
 /**
  * Class to test HBaseAdmin.
@@ -1180,8 +1180,10 @@ public class TestAdmin1 {
     gotException = false;
     // Try merging a replica with another. Should fail.
     try {
+      // TODO convert this to version that is synchronous (See HBASE-16668)
       TEST_UTIL.getAdmin().mergeRegionsAsync(regions.get(1).getFirst().getEncodedNameAsBytes(),
-          regions.get(2).getFirst().getEncodedNameAsBytes(), true);
+          regions.get(2).getFirst().getEncodedNameAsBytes(), true)
+          .get(60, TimeUnit.SECONDS);
     } catch (IllegalArgumentException m) {
       gotException = true;
     }
@@ -1189,11 +1191,15 @@ public class TestAdmin1 {
     // Try going to the master directly (that will skip the check in admin)
     try {
       DispatchMergingRegionsRequest request = RequestConverter
-          .buildDispatchMergingRegionsRequest(regions.get(1).getFirst().getEncodedNameAsBytes(),
-              regions.get(2).getFirst().getEncodedNameAsBytes(), true);
+          .buildDispatchMergingRegionsRequest(
+            regions.get(1).getFirst().getEncodedNameAsBytes(),
+            regions.get(2).getFirst().getEncodedNameAsBytes(),
+            true,
+            HConstants.NO_NONCE,
+            HConstants.NO_NONCE);
       ((ClusterConnection) TEST_UTIL.getAdmin().getConnection()).getMaster()
         .dispatchMergingRegions(null, request);
-    } catch (ServiceException m) {
+    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException m) {
       Throwable t = m.getCause();
       do {
         if (t instanceof MergeRegionException) {
@@ -1354,7 +1360,7 @@ public class TestAdmin1 {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testMergeRegions() throws Exception {
     TableName tableName = TableName.valueOf("testMergeWithFullRegionName");
     HColumnDescriptor cd = new HColumnDescriptor("d");
@@ -1376,17 +1382,21 @@ public class TestAdmin1 {
       assertEquals(3, admin.getTableRegions(tableName).size());
       regionA = tableRegions.get(0);
       regionB = tableRegions.get(1);
-      admin.mergeRegionsAsync(regionA.getRegionName(), regionB.getRegionName(), false);
-      Thread.sleep(1000);
+      // TODO convert this to version that is synchronous (See HBASE-16668)
+      admin.mergeRegionsAsync(regionA.getRegionName(), regionB.getRegionName(), false)
+          .get(60, TimeUnit.SECONDS);
+
       assertEquals(2, admin.getTableRegions(tableName).size());
 
       // merge with encoded name
       tableRegions = admin.getTableRegions(tableName);
       regionA = tableRegions.get(0);
       regionB = tableRegions.get(1);
+      // TODO convert this to version that is synchronous (See HBASE-16668)
       admin.mergeRegionsAsync(
-        regionA.getEncodedNameAsBytes(), regionB.getEncodedNameAsBytes(), false);
-      Thread.sleep(1000);
+        regionA.getEncodedNameAsBytes(), regionB.getEncodedNameAsBytes(), false)
+          .get(60, TimeUnit.SECONDS);
+
       assertEquals(1, admin.getTableRegions(tableName).size());
     } finally {
       this.admin.disableTable(tableName);

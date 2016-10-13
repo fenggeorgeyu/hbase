@@ -25,10 +25,9 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.FilterProtos;
-
-import com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.FilterProtos;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * A wrapper filter that returns true from {@link #filterAllRemaining()} as soon
@@ -74,6 +73,7 @@ public class WhileMatchFilter extends FilterBase {
 
   @Override
   public boolean filterRowKey(Cell cell) throws IOException {
+    if (filterAllRemaining()) return true;
     boolean value = filter.filterRowKey(cell);
     changeFAR(value);
     return value;

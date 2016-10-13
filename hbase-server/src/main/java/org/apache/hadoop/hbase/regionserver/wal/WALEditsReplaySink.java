@@ -18,8 +18,6 @@
  */
 package org.apache.hadoop.hbase.regionserver.wal;
 
-import com.google.protobuf.ServiceException;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -38,17 +36,15 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.ClientServiceCallable;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
-import org.apache.hadoop.hbase.client.RegionServerCallable;
 import org.apache.hadoop.hbase.client.RpcRetryingCallerFactory;
-import org.apache.hadoop.hbase.ipc.PayloadCarryingRpcController;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.ReplicationProtbufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.ReplicateWALEntryResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ReplicateWALEntryResponse;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
@@ -61,10 +57,8 @@ import org.apache.hadoop.hbase.wal.WAL.Entry;
  */
 @InterfaceAudience.Private
 public class WALEditsReplaySink {
-
   private static final Log LOG = LogFactory.getLog(WALEditsReplaySink.class);
   private static final int MAX_BATCH_SIZE = 1024;
-
   private final Configuration conf;
   private final ClusterConnection conn;
   private final TableName tableName;
@@ -166,8 +160,8 @@ public class WALEditsReplaySink {
     try {
       RpcRetryingCallerFactory factory = RpcRetryingCallerFactory.instantiate(conf, null);
       ReplayServerCallable<ReplicateWALEntryResponse> callable =
-          new ReplayServerCallable<ReplicateWALEntryResponse>(this.conn, this.tableName, regionLoc,
-              regionInfo, entries);
+          new ReplayServerCallable<ReplicateWALEntryResponse>(this.conn, this.rpcControllerFactory,
+              this.tableName, regionLoc, entries);
       factory.<ReplicateWALEntryResponse> newCaller().callWithRetries(callable, this.replayTimeout);
     } catch (IOException ie) {
       if (skipErrors) {
@@ -183,32 +177,20 @@ public class WALEditsReplaySink {
    * Callable that handles the <code>replay</code> method call going against a single regionserver
    * @param <R>
    */
-  class ReplayServerCallable<R> extends RegionServerCallable<ReplicateWALEntryResponse> {
-    private HRegionInfo regionInfo;
+  class ReplayServerCallable<R> extends ClientServiceCallable<ReplicateWALEntryResponse> {
     private List<Entry> entries;
 
-    ReplayServerCallable(final Connection connection, final TableName tableName,
-        final HRegionLocation regionLoc, final HRegionInfo regionInfo,
-        final List<Entry> entries) {
-      super(connection, tableName, null);
+    ReplayServerCallable(final Connection connection, RpcControllerFactory rpcControllerFactory,
+        final TableName tableName, final HRegionLocation regionLoc, final List<Entry> entries) {
+      super(connection, tableName, HConstants.EMPTY_BYTE_ARRAY,
+          rpcControllerFactory.newController());
       this.entries = entries;
-      this.regionInfo = regionInfo;
       setLocation(regionLoc);
     }
 
     @Override
-    public ReplicateWALEntryResponse call(int callTimeout) throws IOException {
-      try {
-        replayToServer(this.regionInfo, this.entries);
-      } catch (ServiceException se) {
-        throw ProtobufUtil.getRemoteException(se);
-      }
-      return null;
-    }
-
-    private void replayToServer(HRegionInfo regionInfo, List<Entry> entries)
-        throws IOException, ServiceException {
-      if (entries.isEmpty()) return;
+    protected ReplicateWALEntryResponse rpcCall() throws Exception {
+      if (entries.isEmpty()) return null;
 
       Entry[] entriesArray = new Entry[entries.size()];
       entriesArray = entries.toArray(entriesArray);
@@ -216,12 +198,8 @@ public class WALEditsReplaySink {
 
       Pair<AdminProtos.ReplicateWALEntryRequest, CellScanner> p =
           ReplicationProtbufUtil.buildReplicateWALEntryRequest(entriesArray);
-      PayloadCarryingRpcController controller = rpcControllerFactory.newController(p.getSecond());
-      try {
-        remoteSvr.replay(controller, p.getFirst());
-      } catch (ServiceException se) {
-        throw ProtobufUtil.getRemoteException(se);
-      }
+      setRpcControllerCellScanner(p.getSecond());
+      return remoteSvr.replay(getRpcController(), p.getFirst());
     }
 
     @Override

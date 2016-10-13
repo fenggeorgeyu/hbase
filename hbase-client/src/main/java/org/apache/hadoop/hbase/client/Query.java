@@ -25,11 +25,12 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.io.TimeRange;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.security.access.AccessControlConstants;
+import org.apache.hadoop.hbase.security.access.AccessControlUtil;
 import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.visibility.Authorizations;
 import org.apache.hadoop.hbase.security.visibility.VisibilityConstants;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ListMultimap;
@@ -43,7 +44,7 @@ public abstract class Query extends OperationWithAttributes {
   protected int targetReplicaId = -1;
   protected Consistency consistency = Consistency.STRONG;
   protected Map<byte[], TimeRange> colFamTimeRangeMap = Maps.newTreeMap(Bytes.BYTES_COMPARATOR);
-
+  protected Boolean loadColumnFamiliesOnDemand = null;
   /**
    * @return Filter
    */
@@ -96,7 +97,7 @@ public abstract class Query extends OperationWithAttributes {
    */
   public Query setACL(String user, Permission perms) {
     setAttribute(AccessControlConstants.OP_ATTRIBUTE_ACL,
-      ProtobufUtil.toUsersAndPermissions(user, perms).toByteArray());
+      AccessControlUtil.toUsersAndPermissions(user, perms).toByteArray());
     return this;
   }
 
@@ -109,7 +110,7 @@ public abstract class Query extends OperationWithAttributes {
       permMap.put(entry.getKey(), entry.getValue());
     }
     setAttribute(AccessControlConstants.OP_ATTRIBUTE_ACL,
-      ProtobufUtil.toUsersAndPermissions(permMap).toByteArray());
+        AccessControlUtil.toUsersAndPermissions(permMap).toByteArray());
     return this;
   }
 
@@ -178,6 +179,41 @@ public abstract class Query extends OperationWithAttributes {
                           IsolationLevel.fromBytes(attr);
   }
 
+  /**
+   * Set the value indicating whether loading CFs on demand should be allowed (cluster
+   * default is false). On-demand CF loading doesn't load column families until necessary, e.g.
+   * if you filter on one column, the other column family data will be loaded only for the rows
+   * that are included in result, not all rows like in normal case.
+   * With column-specific filters, like SingleColumnValueFilter w/filterIfMissing == true,
+   * this can deliver huge perf gains when there's a cf with lots of data; however, it can
+   * also lead to some inconsistent results, as follows:
+   * - if someone does a concurrent update to both column families in question you may get a row
+   *   that never existed, e.g. for { rowKey = 5, { cat_videos =&gt; 1 }, { video =&gt; "my cat" } }
+   *   someone puts rowKey 5 with { cat_videos =&gt; 0 }, { video =&gt; "my dog" }, concurrent scan
+   *   filtering on "cat_videos == 1" can get { rowKey = 5, { cat_videos =&gt; 1 },
+   *   { video =&gt; "my dog" } }.
+   * - if there's a concurrent split and you have more than 2 column families, some rows may be
+   *   missing some column families.
+   */
+  public Query setLoadColumnFamiliesOnDemand(boolean value) {
+    this.loadColumnFamiliesOnDemand = value;
+    return this;
+  }
+
+  /**
+   * Get the raw loadColumnFamiliesOnDemand setting; if it's not set, can be null.
+   */
+  public Boolean getLoadColumnFamiliesOnDemandValue() {
+    return this.loadColumnFamiliesOnDemand;
+  }
+
+  /**
+   * Get the logical value indicating whether on-demand CF loading should be allowed.
+   */
+  public boolean doLoadColumnFamiliesOnDemand() {
+    return (this.loadColumnFamiliesOnDemand != null)
+      && this.loadColumnFamiliesOnDemand;
+  }
 
   /**
    * Get versions of columns only within the specified timestamp range,

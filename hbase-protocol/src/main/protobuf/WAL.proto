@@ -24,7 +24,6 @@ option java_generate_equals_and_hash = true;
 option optimize_for = SPEED;
 
 import "HBase.proto";
-import "Client.proto";
 
 message WALHeader {
   optional bool has_compression = 1;
@@ -76,6 +75,7 @@ message WALKey {
 enum ScopeType {
   REPLICATION_SCOPE_LOCAL = 0;
   REPLICATION_SCOPE_GLOBAL = 1;
+  REPLICATION_SCOPE_SERIAL = 2;
 }
 
 message FamilyScope {

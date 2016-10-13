@@ -36,7 +36,7 @@ import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.Filter.ReturnCode;
 import org.apache.hadoop.hbase.filter.FilterList.Operator;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -262,6 +262,7 @@ public class TestFilterList {
    * we expect to get the same result as the 'prefix' only result.
    * @throws Exception
    */
+  @Test
   public void testFilterListTwoFiltersMustPassOne() throws Exception {
     byte[] r1 = Bytes.toBytes("Row1");
     byte[] r11 = Bytes.toBytes("Row11");
@@ -294,6 +295,7 @@ public class TestFilterList {
    * we expect to get the same result as the inclusive stop result.
    * @throws Exception
    */
+  @Test
   public void testFilterListWithInclusiveStopFilteMustPassOne() throws Exception {
     byte[] r1 = Bytes.toBytes("Row1");
     byte[] r11 = Bytes.toBytes("Row11");
@@ -353,6 +355,7 @@ public class TestFilterList {
    * Test filterKeyValue logic.
    * @throws Exception
    */
+  @Test
   public void testFilterKeyValue() throws Exception {
     Filter includeFilter = new FilterBase() {
       @Override

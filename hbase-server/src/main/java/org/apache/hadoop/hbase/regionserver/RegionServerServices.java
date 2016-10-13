@@ -19,6 +19,7 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
@@ -32,7 +33,7 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.executor.ExecutorService;
 import org.apache.hadoop.hbase.ipc.RpcServerInterface;
 import org.apache.hadoop.hbase.master.TableLockManager;
-import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 import org.apache.hadoop.hbase.quotas.RegionServerQuotaManager;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.wal.WAL;
@@ -54,6 +55,11 @@ public interface RegionServerServices extends OnlineRegions, FavoredNodesForRegi
   /** @return the WAL for a particular region. Pass null for getting the
    * default (common) WAL */
   WAL getWAL(HRegionInfo regionInfo) throws IOException;
+
+  /** @return the List of WALs that are used by this server
+   *  Doesn't include the meta WAL
+   */
+  List<WAL> getWALs() throws IOException;
 
   /**
    * @return Implementation of {@link CompactionRequestor} or null.
@@ -79,6 +85,11 @@ public interface RegionServerServices extends OnlineRegions, FavoredNodesForRegi
    * @return RegionServer's instance of {@link RegionServerQuotaManager}
    */
   RegionServerQuotaManager getRegionServerQuotaManager();
+
+  /**
+   * @return RegionServer's instance of {@link SecureBulkLoadManager}
+   */
+  SecureBulkLoadManager getSecureBulkLoadManager();
 
   /**
    * Context for postOpenDeployTasks().

@@ -996,12 +996,13 @@ public class BucketCache implements BlockCache, HeapSize {
             + ", expected:" + backingMap.getClass().getName());
       UniqueIndexMap<Integer> deserMap = (UniqueIndexMap<Integer>) ois
           .readObject();
+      ConcurrentHashMap<BlockCacheKey, BucketEntry> backingMapFromFile =
+          (ConcurrentHashMap<BlockCacheKey, BucketEntry>) ois.readObject();
       BucketAllocator allocator = new BucketAllocator(cacheCapacity, bucketSizes,
-          backingMap, realCacheSize);
-      backingMap = (ConcurrentHashMap<BlockCacheKey, BucketEntry>) ois
-          .readObject();
+          backingMapFromFile, realCacheSize);
       bucketAllocator = allocator;
       deserialiserMap = deserMap;
+      backingMap = backingMapFromFile;
     } finally {
       if (ois != null) ois.close();
       if (fis != null) fis.close();
@@ -1141,9 +1142,7 @@ public class BucketCache implements BlockCache, HeapSize {
 
       @Override
       public int compare(BucketEntry o1, BucketEntry o2) {
-        long accessCounter1 = o1.accessCounter;
-        long accessCounter2 = o2.accessCounter;
-        return accessCounter1 < accessCounter2 ? 1 : accessCounter1 == accessCounter2 ? 0 : -1;
+        return Long.compare(o2.accessCounter, o1.accessCounter);
       }
     };
 
@@ -1271,9 +1270,7 @@ public class BucketCache implements BlockCache, HeapSize {
 
     @Override
     public int compareTo(BucketEntryGroup that) {
-      if (this.overflow() == that.overflow())
-        return 0;
-      return this.overflow() > that.overflow() ? 1 : -1;
+      return Long.compare(this.overflow(), that.overflow());
     }
 
     @Override
@@ -1420,13 +1417,14 @@ public class BucketCache implements BlockCache, HeapSize {
           public int compareTo(CachedBlock other) {
             int diff = this.getFilename().compareTo(other.getFilename());
             if (diff != 0) return diff;
-            diff = (int)(this.getOffset() - other.getOffset());
+
+            diff = Long.compare(this.getOffset(), other.getOffset());
             if (diff != 0) return diff;
             if (other.getCachedTime() < 0 || this.getCachedTime() < 0) {
               throw new IllegalStateException("" + this.getCachedTime() + ", " +
                 other.getCachedTime());
             }
-            return (int)(other.getCachedTime() - this.getCachedTime());
+            return Long.compare(other.getCachedTime(), this.getCachedTime());
           }
 
           @Override

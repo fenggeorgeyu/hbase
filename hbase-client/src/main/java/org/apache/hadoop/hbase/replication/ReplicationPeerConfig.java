@@ -22,12 +22,12 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -42,7 +42,7 @@ public class ReplicationPeerConfig {
   private final Map<byte[], byte[]> peerData;
   private final Map<String, String> configuration;
   private Map<TableName, ? extends Collection<String>> tableCFsMap = null;
-
+  private Set<String> namespaces = null;
 
   public ReplicationPeerConfig() {
     this.peerData = new TreeMap<byte[], byte[]>(Bytes.BYTES_COMPARATOR);
@@ -93,10 +93,22 @@ public class ReplicationPeerConfig {
     return this;
   }
 
+  public Set<String> getNamespaces() {
+    return this.namespaces;
+  }
+
+  public ReplicationPeerConfig setNamespaces(Set<String> namespaces) {
+    this.namespaces = namespaces;
+    return this;
+  }
+
   @Override
   public String toString() {
     StringBuilder builder = new StringBuilder("clusterKey=").append(clusterKey).append(",");
     builder.append("replicationEndpointImpl=").append(replicationEndpointImpl).append(",");
+    if (namespaces != null) {
+      builder.append("namespaces=").append(namespaces.toString()).append(",");
+    }
     if (tableCFsMap != null) {
       builder.append("tableCFs=").append(tableCFsMap.toString());
     }

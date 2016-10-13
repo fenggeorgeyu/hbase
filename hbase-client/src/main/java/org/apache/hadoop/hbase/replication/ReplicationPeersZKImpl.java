@@ -38,7 +38,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.replication.ReplicationSerDeHelper;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.replication.ReplicationPeer.PeerState;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
@@ -131,7 +131,6 @@ public class ReplicationPeersZKImpl extends ReplicationStateZKBase implements Re
       List<ZKUtilOp> listOfOps = new ArrayList<ZKUtil.ZKUtilOp>();
       ZKUtilOp op1 = ZKUtilOp.createAndFailSilent(getPeerNode(id),
         ReplicationSerDeHelper.toByteArray(peerConfig));
-      // There is a race (if hbase.zookeeper.useMulti is false)
       // b/w PeerWatcher and ReplicationZookeeper#add method to create the
       // peer-state znode. This happens while adding a peer
       // The peer state data is set as "ENABLED" by default.
@@ -343,7 +342,7 @@ public class ReplicationPeersZKImpl extends ReplicationStateZKBase implements Re
       throws ReplicationException {
     ReplicationPeer peer = getConnectedPeer(id);
     if (peer == null){
-      throw new ReplicationException("Could not find peer Id " + id);
+      throw new ReplicationException("Could not find peer Id " + id + " in connected peers");
     }
     ReplicationPeerConfig existingConfig = peer.getPeerConfig();
     if (newConfig.getClusterKey() != null && !newConfig.getClusterKey().isEmpty() &&
@@ -366,6 +365,8 @@ public class ReplicationPeersZKImpl extends ReplicationStateZKBase implements Re
     // or data that weren't explicitly changed
     existingConfig.getConfiguration().putAll(newConfig.getConfiguration());
     existingConfig.getPeerData().putAll(newConfig.getPeerData());
+    existingConfig.setTableCFsMap(newConfig.getTableCFsMap());
+    existingConfig.setNamespaces(newConfig.getNamespaces());
 
     try {
       ZKUtil.setData(this.zookeeper, getPeerNode(id),

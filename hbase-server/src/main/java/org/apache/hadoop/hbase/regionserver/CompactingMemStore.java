@@ -22,7 +22,6 @@ import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,9 +50,7 @@ import org.apache.hadoop.hbase.wal.WAL;
  */
 @InterfaceAudience.Private
 public class CompactingMemStore extends AbstractMemStore {
-  public final static long DEEP_OVERHEAD_PER_PIPELINE_ITEM = ClassSize.align(
-      ClassSize.TIMERANGE_TRACKER + ClassSize.TIMERANGE +
-          ClassSize.CELL_SKIPLIST_SET + ClassSize.CONCURRENT_SKIPLISTMAP);
+
   // Default fraction of in-memory-flush size w.r.t. flush-to-disk size
   public static final String IN_MEMORY_FLUSH_THRESHOLD_FACTOR_KEY =
       "hbase.memstore.inmemoryflush.threshold.factor";
@@ -64,10 +61,18 @@ public class CompactingMemStore extends AbstractMemStore {
   private RegionServicesForStores regionServices;
   private CompactionPipeline pipeline;
   private MemStoreCompactor compactor;
-  // the threshold on active size for in-memory flush
-  private long inmemoryFlushSize;
+
+  private long inmemoryFlushSize;       // the threshold on active size for in-memory flush
   private final AtomicBoolean inMemoryFlushInProgress = new AtomicBoolean(false);
+  @VisibleForTesting
   private final AtomicBoolean allowCompaction = new AtomicBoolean(true);
+
+  public static final long DEEP_OVERHEAD = AbstractMemStore.DEEP_OVERHEAD
+      + 6 * ClassSize.REFERENCE // Store, RegionServicesForStores, CompactionPipeline,
+                                // MemStoreCompactor, inMemoryFlushInProgress, allowCompaction
+      + Bytes.SIZEOF_LONG // inmemoryFlushSize
+      + 2 * ClassSize.ATOMIC_BOOLEAN// inMemoryFlushInProgress and allowCompaction
+      + CompactionPipeline.DEEP_OVERHEAD + MemStoreCompactor.DEEP_OVERHEAD;
 
   public CompactingMemStore(Configuration conf, CellComparator c,
       HStore store, RegionServicesForStores regionServices) throws IOException {
@@ -94,28 +99,18 @@ public class CompactingMemStore extends AbstractMemStore {
     LOG.info("Setting in-memory flush size threshold to " + inmemoryFlushSize);
   }
 
-  public static long getSegmentSize(Segment segment) {
-    return segment.getSize() - DEEP_OVERHEAD_PER_PIPELINE_ITEM;
-  }
-
-  public static long getSegmentsSize(List<? extends Segment> list) {
-    long res = 0;
-    for (Segment segment : list) {
-      res += getSegmentSize(segment);
-    }
-    return res;
-  }
-
   /**
-   * @return Total memory occupied by this MemStore.
-   * This is not thread safe and the memstore may be changed while computing its size.
-   * It is the responsibility of the caller to make sure this doesn't happen.
+   * @return Total memory occupied by this MemStore. This includes active segment size and heap size
+   *         overhead of this memstore but won't include any size occupied by the snapshot. We
+   *         assume the snapshot will get cleared soon. This is not thread safe and the memstore may
+   *         be changed while computing its size. It is the responsibility of the caller to make
+   *         sure this doesn't happen.
    */
   @Override
   public long size() {
-    long res = 0;
-    for (Segment item : getSegments()) {
-      res += item.getSize();
+    long res = DEEP_OVERHEAD + this.active.size();
+    for (Segment item : pipeline.getSegments()) {
+      res += CompactionPipeline.ENTRY_OVERHEAD + item.size();
     }
     return res;
   }
@@ -125,11 +120,13 @@ public class CompactingMemStore extends AbstractMemStore {
    * The store may do any post-flush actions at this point.
    * One example is to update the WAL with sequence number that is known only at the store level.
    */
-  @Override public void finalizeFlush() {
+  @Override
+  public void finalizeFlush() {
     updateLowestUnflushedSequenceIdInWAL(false);
   }
 
-  @Override public boolean isSloppy() {
+  @Override
+  public boolean isSloppy() {
     return true;
   }
 
@@ -142,10 +139,9 @@ public class CompactingMemStore extends AbstractMemStore {
    */
   @Override
   public MemStoreSnapshot snapshot() {
-    MutableSegment active = getActive();
     // If snapshot currently has entries, then flusher failed or didn't call
     // cleanup.  Log a warning.
-    if (!getSnapshot().isEmpty()) {
+    if (!this.snapshot.isEmpty()) {
       LOG.warn("Snapshot called again without clearing previous. " +
           "Doing nothing. Another ongoing flush or did we fail last attempt?");
     } else {
@@ -155,21 +151,22 @@ public class CompactingMemStore extends AbstractMemStore {
             + getFamilyName());
       }
       stopCompaction();
-      pushActiveToPipeline(active);
+      pushActiveToPipeline(this.active);
       snapshotId = EnvironmentEdgeManager.currentTime();
       pushTailToSnapshot();
     }
-    return new MemStoreSnapshot(snapshotId, getSnapshot());
+    return new MemStoreSnapshot(snapshotId, this.snapshot);
   }
 
   /**
    * On flush, how much memory we will clear.
    * @return size of data that is going to be flushed
    */
-  @Override public long getFlushableSize() {
-    long snapshotSize = getSnapshot().getSize();
-    if(snapshotSize == 0) {
-      //if snapshot is empty the tail of the pipeline is flushed
+  @Override
+  public long getFlushableSize() {
+    long snapshotSize = getSnapshotSize();
+    if (snapshotSize == 0) {
+      // if snapshot is empty the tail of the pipeline is flushed
       snapshotSize = pipeline.getTailSize();
     }
     return snapshotSize > 0 ? snapshotSize : keySize();
@@ -180,7 +177,7 @@ public class CompactingMemStore extends AbstractMemStore {
     long minSequenceId = pipeline.getMinSequenceId();
     if(minSequenceId != Long.MAX_VALUE) {
       byte[] encodedRegionName = getRegionServices().getRegionInfo().getEncodedNameAsBytes();
-      byte[] familyName = getFamilyNameInByte();
+      byte[] familyName = getFamilyNameInBytes();
       WAL WAL = getRegionServices().getWAL();
       if (WAL != null) {
         WAL.updateStore(encodedRegionName, familyName, minSequenceId, onlyIfGreater);
@@ -191,10 +188,10 @@ public class CompactingMemStore extends AbstractMemStore {
   @Override
   public List<Segment> getSegments() {
     List<Segment> pipelineList = pipeline.getSegments();
-    List<Segment> list = new LinkedList<Segment>();
-    list.add(getActive());
+    List<Segment> list = new ArrayList<Segment>(pipelineList.size() + 2);
+    list.add(this.active);
     list.addAll(pipelineList);
-    list.add(getSnapshot());
+    list.add(this.snapshot);
     return list;
   }
 
@@ -203,11 +200,20 @@ public class CompactingMemStore extends AbstractMemStore {
     return pipeline.swap(versionedList, result);
   }
 
-  public boolean hasCompactibleSegments() {
+  /**
+   * @param requesterVersion The caller must hold the VersionedList of the pipeline
+   *           with version taken earlier. This version must be passed as a parameter here.
+   *           The flattening happens only if versions match.
+   */
+  public void flattenOneSegment(long requesterVersion) {
+    pipeline.flattenYoungestSegment(requesterVersion);
+  }
+
+  public boolean hasImmutableSegments() {
     return !pipeline.isEmpty();
   }
 
-  public VersionedSegmentsList getCompactibleSegments() {
+  public VersionedSegmentsList getImmutableSegments() {
     return pipeline.getVersionedList();
   }
 
@@ -220,7 +226,7 @@ public class CompactingMemStore extends AbstractMemStore {
   }
 
   public String getFamilyName() {
-    return Bytes.toString(getFamilyNameInByte());
+    return Bytes.toString(getFamilyNameInBytes());
   }
 
   @Override
@@ -233,14 +239,13 @@ public class CompactingMemStore extends AbstractMemStore {
     // The list of elements in pipeline + the active element + the snapshot segment
     // TODO : This will change when the snapshot is made of more than one element
     List<KeyValueScanner> list = new ArrayList<KeyValueScanner>(pipelineList.size() + 2);
-    list.add(getActive().getSegmentScanner(readPt, order + 1));
+    list.add(this.active.getScanner(readPt, order + 1));
     for (Segment item : pipelineList) {
-      list.add(item.getSegmentScanner(readPt, order));
+      list.add(item.getScanner(readPt, order));
       order--;
     }
-    list.add(getSnapshot().getSegmentScanner(readPt, order));
-    return Collections.<KeyValueScanner> singletonList(
-      new MemStoreScanner((AbstractMemStore) this, list, readPt));
+    list.add(this.snapshot.getScanner(readPt, order));
+    return Collections.<KeyValueScanner> singletonList(new MemStoreScanner(getComparator(), list));
   }
 
   /**
@@ -272,29 +277,28 @@ public class CompactingMemStore extends AbstractMemStore {
   void flushInMemory() throws IOException {
     // setting the inMemoryFlushInProgress flag again for the case this method is invoked
     // directly (only in tests) in the common path setting from true to true is idempotent
-    // Speculative compaction execution, may be interrupted if flush is forced while
-    // compaction is in progress
     inMemoryFlushInProgress.set(true);
     try {
       // Phase I: Update the pipeline
       getRegionServices().blockUpdates();
       try {
-        MutableSegment active = getActive();
         if (LOG.isDebugEnabled()) {
-          LOG.debug("IN-MEMORY FLUSH: Pushing active segment into compaction pipeline, "
-              + "and initiating compaction.");
+          LOG.debug("IN-MEMORY FLUSH: Pushing active segment into compaction pipeline");
         }
-        pushActiveToPipeline(active);
+        pushActiveToPipeline(this.active);
       } finally {
         getRegionServices().unblockUpdates();
       }
+
       // Used by tests
       if (!allowCompaction.get()) {
         return;
       }
       // Phase II: Compact the pipeline
       try {
-        compactor.startCompaction();
+        // Speculative compaction execution, may be interrupted if flush is forced while
+        // compaction is in progress
+        compactor.start();
       } catch (IOException e) {
         LOG.warn("Unable to run memstore compaction. region "
             + getRegionServices().getRegionInfo().getRegionNameAsString() + "store: "
@@ -305,7 +309,7 @@ public class CompactingMemStore extends AbstractMemStore {
     }
   }
 
-  private byte[] getFamilyNameInByte() {
+  private byte[] getFamilyNameInBytes() {
     return store.getFamily().getName();
   }
 
@@ -314,9 +318,10 @@ public class CompactingMemStore extends AbstractMemStore {
   }
 
   private boolean shouldFlushInMemory() {
-    if (getActive().getSize() > inmemoryFlushSize) {
-      // size above flush threshold
-      return inMemoryFlushInProgress.compareAndSet(false, true);
+    if (this.active.size() > inmemoryFlushSize) { // size above flush threshold
+        // the inMemoryFlushInProgress is CASed to be true here in order to mutual exclude
+        // the insert of the active into the compaction pipeline
+        return (inMemoryFlushInProgress.compareAndSet(false,true));
     }
     return false;
   }
@@ -328,26 +333,22 @@ public class CompactingMemStore extends AbstractMemStore {
    */
   private void stopCompaction() {
     if (inMemoryFlushInProgress.get()) {
-      compactor.stopCompact();
+      compactor.stop();
       inMemoryFlushInProgress.set(false);
     }
   }
 
   private void pushActiveToPipeline(MutableSegment active) {
     if (!active.isEmpty()) {
-      long delta = DEEP_OVERHEAD_PER_PIPELINE_ITEM - DEEP_OVERHEAD;
-      active.setSize(active.getSize() + delta);
       pipeline.pushHead(active);
-      resetCellSet();
+      resetActive();
     }
   }
 
   private void pushTailToSnapshot() {
     ImmutableSegment tail = pipeline.pullTail();
     if (!tail.isEmpty()) {
-      setSnapshot(tail);
-      long size = getSegmentSize(tail);
-      setSnapshotSize(size);
+      this.snapshot = tail;
     }
   }
 
@@ -410,4 +411,14 @@ public class CompactingMemStore extends AbstractMemStore {
     }
     return lowest;
   }
+
+  // debug method
+  public void debug() {
+    String msg = "active size=" + this.active.size();
+    msg += " threshold="+IN_MEMORY_FLUSH_THRESHOLD_FACTOR_DEFAULT* inmemoryFlushSize;
+    msg += " allow compaction is "+ (allowCompaction.get() ? "true" : "false");
+    msg += " inMemoryFlushInProgress is "+ (inMemoryFlushInProgress.get() ? "true" : "false");
+    LOG.debug(msg);
+  }
+
 }

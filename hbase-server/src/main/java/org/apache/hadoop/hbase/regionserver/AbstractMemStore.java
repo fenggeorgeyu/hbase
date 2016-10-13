@@ -33,7 +33,9 @@ import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
+import org.apache.hadoop.hbase.ShareableMemory;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
@@ -50,34 +52,29 @@ public abstract class AbstractMemStore implements MemStore {
   private final CellComparator comparator;
 
   // active segment absorbs write operations
-  private volatile MutableSegment active;
+  protected volatile MutableSegment active;
   // Snapshot of memstore.  Made for flusher.
-  private volatile ImmutableSegment snapshot;
+  protected volatile ImmutableSegment snapshot;
   protected volatile long snapshotId;
   // Used to track when to flush
   private volatile long timeOfOldestEdit;
 
-  public final static long FIXED_OVERHEAD = ClassSize.align(
-      ClassSize.OBJECT +
-          (4 * ClassSize.REFERENCE) +
-          (2 * Bytes.SIZEOF_LONG));
+  public final static long FIXED_OVERHEAD = ClassSize
+      .align(ClassSize.OBJECT + (4 * ClassSize.REFERENCE) + (2 * Bytes.SIZEOF_LONG));
 
-  public final static long DEEP_OVERHEAD = ClassSize.align(FIXED_OVERHEAD +
-      (ClassSize.ATOMIC_LONG + ClassSize.TIMERANGE_TRACKER +
-      ClassSize.CELL_SKIPLIST_SET + ClassSize.CONCURRENT_SKIPLISTMAP));
-
+  public final static long DEEP_OVERHEAD = FIXED_OVERHEAD;
 
   protected AbstractMemStore(final Configuration conf, final CellComparator c) {
     this.conf = conf;
     this.comparator = c;
-    resetCellSet();
-    this.snapshot = SegmentFactory.instance().createImmutableSegment(conf, c, 0);
+    resetActive();
+    this.snapshot = SegmentFactory.instance().createImmutableSegment(c);
     this.snapshotId = NO_SNAPSHOT_ID;
   }
 
-  protected void resetCellSet() {
+  protected void resetActive() {
     // Reset heap to not include any keys
-    this.active = SegmentFactory.instance().createMutableSegment(conf, comparator, DEEP_OVERHEAD);
+    this.active = SegmentFactory.instance().createMutableSegment(conf, comparator);
     this.timeOfOldestEdit = Long.MAX_VALUE;
   }
 
@@ -100,6 +97,15 @@ public abstract class AbstractMemStore implements MemStore {
    */
   public abstract void updateLowestUnflushedSequenceIdInWAL(boolean onlyIfMoreRecent);
 
+  @Override
+  public long add(Iterable<Cell> cells) {
+    long size = 0;
+    for (Cell cell : cells) {
+      size += add(cell);
+    }
+    return size;
+  }
+  
   /**
    * Write an update
    * @param cell the cell to be added
@@ -110,7 +116,29 @@ public abstract class AbstractMemStore implements MemStore {
   public long add(Cell cell) {
     Cell toAdd = maybeCloneWithAllocator(cell);
     boolean mslabUsed = (toAdd != cell);
+    // This cell data is backed by the same byte[] where we read request in RPC(See HBASE-15180). By
+    // default MSLAB is ON and we might have copied cell to MSLAB area. If not we must do below deep
+    // copy. Or else we will keep referring to the bigger chunk of memory and prevent it from
+    // getting GCed.
+    // Copy to MSLAB would not have happened if
+    // 1. MSLAB is turned OFF. See "hbase.hregion.memstore.mslab.enabled"
+    // 2. When the size of the cell is bigger than the max size supported by MSLAB. See
+    // "hbase.hregion.memstore.mslab.max.allocation". This defaults to 256 KB
+    // 3. When cells are from Append/Increment operation.
+    if (!mslabUsed) {
+      toAdd = deepCopyIfNeeded(toAdd);
+    }
     return internalAdd(toAdd, mslabUsed);
+  }
+
+  private static Cell deepCopyIfNeeded(Cell cell) {
+    // When Cell is backed by a shared memory chunk (this can be a chunk of memory where we read the
+    // req into) the Cell instance will be of type ShareableMemory. Later we will add feature to
+    // read the RPC request into pooled direct ByteBuffers.
+    if (cell instanceof ShareableMemory) {
+      return ((ShareableMemory) cell).cloneToCell();
+    }
+    return cell;
   }
 
   /**
@@ -156,10 +184,8 @@ public abstract class AbstractMemStore implements MemStore {
    */
   @Override
   public long delete(Cell deleteCell) {
-    Cell toAdd = maybeCloneWithAllocator(deleteCell);
-    boolean mslabUsed = (toAdd != deleteCell);
-    long s = internalAdd(toAdd, mslabUsed);
-    return s;
+    // Delete operation just adds the delete marker cell coming here.
+    return add(deleteCell);
   }
 
   /**
@@ -169,6 +195,7 @@ public abstract class AbstractMemStore implements MemStore {
    */
   @Override
   public void clearSnapshot(long id) throws UnexpectedStateException {
+    if (this.snapshotId == -1) return;  // already cleared
     if (this.snapshotId != id) {
       throw new UnexpectedStateException("Current snapshot id is " + this.snapshotId + ",passed "
           + id);
@@ -177,8 +204,7 @@ public abstract class AbstractMemStore implements MemStore {
     // create a new snapshot and let the old one go.
     Segment oldSnapshot = this.snapshot;
     if (!this.snapshot.isEmpty()) {
-      this.snapshot = SegmentFactory.instance().createImmutableSegment(
-          getComparator(), 0);
+      this.snapshot = SegmentFactory.instance().createImmutableSegment(this.comparator);
     }
     this.snapshotId = NO_SNAPSHOT_ID;
     oldSnapshot.close();
@@ -190,12 +216,12 @@ public abstract class AbstractMemStore implements MemStore {
    */
   @Override
   public long heapSize() {
-    return getActive().getSize();
+    return size();
   }
 
   @Override
   public long getSnapshotSize() {
-    return getSnapshot().getSize();
+    return this.snapshot.keySize();
   }
 
   @Override
@@ -245,11 +271,15 @@ public abstract class AbstractMemStore implements MemStore {
     // hitting OOME - see TestMemStore.testUpsertMSLAB for a
     // test that triggers the pathological case if we don't avoid MSLAB
     // here.
+    // This cell data is backed by the same byte[] where we read request in RPC(See HBASE-15180). We
+    // must do below deep copy. Or else we will keep referring to the bigger chunk of memory and
+    // prevent it from getting GCed.
+    cell = deepCopyIfNeeded(cell);
     long addedSize = internalAdd(cell, false);
 
     // Get the Cells for the row/family/qualifier regardless of timestamp.
     // For this case we want to clean up any other puts
-    Cell firstCell = KeyValueUtil.createFirstOnRow(
+    Cell firstCell = CellUtil.createFirstOnRow(
         cell.getRowArray(), cell.getRowOffset(), cell.getRowLength(),
         cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength(),
         cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength());
@@ -358,7 +388,7 @@ public abstract class AbstractMemStore implements MemStore {
     // so we cant add the new Cell w/o knowing what's there already, but we also
     // want to take this chance to delete some cells. So two loops (sad)
 
-    SortedSet<Cell> ss = getActive().tailSet(firstCell);
+    SortedSet<Cell> ss = this.active.tailSet(firstCell);
     for (Cell cell : ss) {
       // if this isnt the row we are interested in, then bail:
       if (!CellUtil.matchingColumn(cell, family, qualifier)
@@ -406,29 +436,25 @@ public abstract class AbstractMemStore implements MemStore {
     }
   }
 
+  /**
+   * @return The size of the active segment. Means sum of all cell's size.
+   */
   protected long keySize() {
-    return heapSize() - DEEP_OVERHEAD;
+    return this.active.keySize();
   }
 
   protected CellComparator getComparator() {
     return comparator;
   }
 
-  protected MutableSegment getActive() {
+  @VisibleForTesting
+  MutableSegment getActive() {
     return active;
   }
 
-  protected ImmutableSegment getSnapshot() {
+  @VisibleForTesting
+  ImmutableSegment getSnapshot() {
     return snapshot;
-  }
-
-  protected AbstractMemStore setSnapshot(ImmutableSegment snapshot) {
-    this.snapshot = snapshot;
-    return this;
-  }
-
-  protected void setSnapshotSize(long snapshotSize) {
-    getSnapshot().setSize(snapshotSize);
   }
 
   /**
@@ -437,7 +463,6 @@ public abstract class AbstractMemStore implements MemStore {
   protected abstract void checkActiveSize();
 
   /**
-   * Returns an ordered list of segments from most recent to oldest in memstore
    * @return an ordered list of segments from most recent to oldest in memstore
    */
   protected abstract List<Segment> getSegments() throws IOException;

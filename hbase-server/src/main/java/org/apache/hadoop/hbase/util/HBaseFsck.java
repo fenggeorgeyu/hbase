@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hbase.util;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -105,7 +104,6 @@ import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.MasterSwitchType;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.client.Result;
@@ -116,8 +114,8 @@ import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.master.MasterFileSystem;
 import org.apache.hadoop.hbase.master.RegionState;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService.BlockingInterface;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService.BlockingInterface;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionFileSystem;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
@@ -210,6 +208,9 @@ public class HBaseFsck extends Configured implements Closeable {
   // AlreadyBeingCreatedException which is implies timeout on this operations up to
   // HdfsConstants.LEASE_SOFTLIMIT_PERIOD (60 seconds).
   private static final int DEFAULT_WAIT_FOR_LOCK_TIMEOUT = 80; // seconds
+  private static final int DEFAULT_MAX_CREATE_ZNODE_ATTEMPTS = 5;
+  private static final int DEFAULT_CREATE_ZNODE_ATTEMPT_SLEEP_INTERVAL = 200; // milliseconds
+  private static final int DEFAULT_CREATE_ZNODE_ATTEMPT_MAX_SLEEP_TIME = 5000; // milliseconds
 
   /**********************
    * Internal resources
@@ -237,8 +238,6 @@ public class HBaseFsck extends Configured implements Closeable {
   private static boolean details = false; // do we display the full report
   private long timelag = DEFAULT_TIME_LAG; // tables whose modtime is older
   private static boolean forceExclusive = false; // only this hbck can modify HBase
-  private static boolean disableBalancer = false; // disable load balancer to keep regions stable
-  private static boolean disableSplitAndMerge = false; // disable split and merge
   private boolean fixAssignments = false; // fix assignment errors?
   private boolean fixMeta = false; // fix meta errors?
   private boolean checkHdfs = true; // load and check fs consistency?
@@ -307,10 +306,14 @@ public class HBaseFsck extends Configured implements Closeable {
   private Map<TableName, TableState> tableStates =
       new HashMap<TableName, TableState>();
   private final RetryCounterFactory lockFileRetryCounterFactory;
+  private final RetryCounterFactory createZNodeRetryCounterFactory;
 
   private Map<TableName, Set<String>> skippedRegions = new HashMap<TableName, Set<String>>();
 
-  ZooKeeperWatcher zkw = null;
+  private ZooKeeperWatcher zkw = null;
+  private String hbckEphemeralNodePath = null;
+  private boolean hbckZodeCreated = false;
+
   /**
    * Constructor
    *
@@ -349,6 +352,14 @@ public class HBaseFsck extends Configured implements Closeable {
         "hbase.hbck.lockfile.attempt.sleep.interval", DEFAULT_LOCK_FILE_ATTEMPT_SLEEP_INTERVAL),
       getConf().getInt(
         "hbase.hbck.lockfile.attempt.maxsleeptime", DEFAULT_LOCK_FILE_ATTEMPT_MAX_SLEEP_TIME));
+    createZNodeRetryCounterFactory = new RetryCounterFactory(
+      getConf().getInt("hbase.hbck.createznode.attempts", DEFAULT_MAX_CREATE_ZNODE_ATTEMPTS),
+      getConf().getInt(
+        "hbase.hbck.createznode.attempt.sleep.interval",
+        DEFAULT_CREATE_ZNODE_ATTEMPT_SLEEP_INTERVAL),
+      getConf().getInt(
+        "hbase.hbck.createznode.attempt.maxsleeptime",
+        DEFAULT_CREATE_ZNODE_ATTEMPT_MAX_SLEEP_TIME));
     zkw = createZooKeeperWatcher();
   }
 
@@ -498,6 +509,7 @@ public class HBaseFsck extends Configured implements Closeable {
       @Override
       public void run() {
         IOUtils.closeQuietly(HBaseFsck.this);
+        cleanupHbckZnode();
         unlockHbck();
       }
     });
@@ -618,7 +630,6 @@ public class HBaseFsck extends Configured implements Closeable {
    */
   public int onlineConsistencyRepair() throws IOException, KeeperException,
     InterruptedException {
-    clearState();
 
     // get regions according to what is online on each RegionServer
     loadDeployedRegions();
@@ -677,52 +688,92 @@ public class HBaseFsck extends Configured implements Closeable {
   }
 
   /**
+   * This method maintains an ephemeral znode. If the creation fails we return false or throw
+   * exception
+   *
+   * @return true if creating znode succeeds; false otherwise
+   * @throws IOException if IO failure occurs
+   */
+  private boolean setMasterInMaintenanceMode() throws IOException {
+    RetryCounter retryCounter = createZNodeRetryCounterFactory.create();
+    hbckEphemeralNodePath = ZKUtil.joinZNode(
+      zkw.znodePaths.masterMaintZNode,
+      "hbck-" + Long.toString(EnvironmentEdgeManager.currentTime()));
+    do {
+      try {
+        hbckZodeCreated = ZKUtil.createEphemeralNodeAndWatch(zkw, hbckEphemeralNodePath, null);
+        if (hbckZodeCreated) {
+          break;
+        }
+      } catch (KeeperException e) {
+        if (retryCounter.getAttemptTimes() >= retryCounter.getMaxAttempts()) {
+           throw new IOException("Can't create znode " + hbckEphemeralNodePath, e);
+        }
+        // fall through and retry
+      }
+
+      LOG.warn("Fail to create znode " + hbckEphemeralNodePath + ", try=" +
+          (retryCounter.getAttemptTimes() + 1) + " of " + retryCounter.getMaxAttempts());
+
+      try {
+        retryCounter.sleepUntilNextRetry();
+      } catch (InterruptedException ie) {
+        throw (InterruptedIOException) new InterruptedIOException(
+              "Can't create znode " + hbckEphemeralNodePath).initCause(ie);
+      }
+    } while (retryCounter.shouldRetry());
+    return hbckZodeCreated;
+  }
+
+  private void cleanupHbckZnode() {
+    try {
+      if (zkw != null && hbckZodeCreated) {
+        ZKUtil.deleteNode(zkw, hbckEphemeralNodePath);
+        hbckZodeCreated = false;
+      }
+    } catch (KeeperException e) {
+      // Ignore
+      if (!e.code().equals(KeeperException.Code.NONODE)) {
+        LOG.warn("Delete HBCK znode " + hbckEphemeralNodePath + " failed ", e);
+      }
+    }
+  }
+
+  /**
    * Contacts the master and prints out cluster-wide information
    * @return 0 on success, non-zero on failure
    */
-  public int onlineHbck() throws IOException, KeeperException, InterruptedException, ServiceException {
+  public int onlineHbck()
+      throws IOException, KeeperException, InterruptedException, ServiceException {
     // print hbase server version
     errors.print("Version: " + status.getHBaseVersion());
+
+    // Clean start
+    clearState();
+    // Do offline check and repair first
     offlineHdfsIntegrityRepair();
-
-    boolean oldBalancer = false;
-    if (shouldDisableBalancer()) {
-      oldBalancer = admin.setBalancerRunning(false, true);
-    }
-    boolean[] oldSplitAndMerge = null;
-    if (shouldDisableSplitAndMerge()) {
-      admin.releaseSplitOrMergeLockAndRollback();
-      oldSplitAndMerge = admin.setSplitOrMergeEnabled(false, false, false,
-        MasterSwitchType.SPLIT, MasterSwitchType.MERGE);
+    offlineReferenceFileRepair();
+    // If Master runs maintenance tasks (such as balancer, catalog janitor, etc) during online
+    // hbck, it is likely that hbck would be misled and report transient errors.  Therefore, it
+    // is better to set Master into maintenance mode during online hbck.
+    //
+    if (!setMasterInMaintenanceMode()) {
+      LOG.warn("HBCK is running while master is not in maintenance mode, you might see transient "
+        + "error.  Please run HBCK multiple times to reduce the chance of transient error.");
     }
 
-    try {
-      onlineConsistencyRepair();
-    }
-    finally {
-      // Only restore the balancer if it was true when we started repairing and
-      // we actually disabled it. Otherwise, we might clobber another run of
-      // hbck that has just restored it.
-      if (shouldDisableBalancer() && oldBalancer) {
-        admin.setBalancerRunning(oldBalancer, false);
-      }
-
-      if (shouldDisableSplitAndMerge()) {
-        if (oldSplitAndMerge != null) {
-          admin.releaseSplitOrMergeLockAndRollback();
-        }
-      }
-    }
+    onlineConsistencyRepair();
 
     if (checkRegionBoundaries) {
       checkRegionBoundaries();
     }
 
-    offlineReferenceFileRepair();
-
     checkAndFixTableLocks();
 
     checkAndFixReplication();
+
+    // Remove the hbck znode
+    cleanupHbckZnode();
 
     // Remove the hbck lock
     unlockHbck();
@@ -744,6 +795,7 @@ public class HBaseFsck extends Configured implements Closeable {
   @Override
   public void close() throws IOException {
     try {
+      cleanupHbckZnode();
       unlockHbck();
     } catch (Exception io) {
       LOG.warn(io);
@@ -1017,6 +1069,7 @@ public class HBaseFsck extends Configured implements Closeable {
    * be fixed before a cluster can start properly.
    */
   private void offlineReferenceFileRepair() throws IOException, InterruptedException {
+    clearState();
     Configuration conf = getConf();
     Path hbaseRoot = FSUtils.getRootDir(conf);
     FileSystem fs = hbaseRoot.getFileSystem(conf);
@@ -1106,7 +1159,10 @@ public class HBaseFsck extends Configured implements Closeable {
   private void loadHdfsRegioninfo(HbckInfo hbi) throws IOException {
     Path regionDir = hbi.getHdfsRegionDir();
     if (regionDir == null) {
-      LOG.warn("No HDFS region dir found: " + hbi + " meta=" + hbi.metaEntry);
+      if (hbi.getReplicaId() == HRegionInfo.DEFAULT_REPLICA_ID) {
+        // Log warning only for default/ primary replica with no region dir
+        LOG.warn("No HDFS region dir found: " + hbi + " meta=" + hbi.metaEntry);
+      }
       return;
     }
 
@@ -1332,10 +1388,11 @@ public class HBaseFsck extends Configured implements Closeable {
   /**
    * This borrows code from MasterFileSystem.bootstrap(). Explicitly creates it's own WAL, so be
    * sure to close it as well as the region when you're finished.
-   *
+   * @param walFactoryID A unique identifier for WAL factory. Filesystem implementations will use
+   *          this ID to make a directory inside WAL directory path.
    * @return an open hbase:meta HRegion
    */
-  private HRegion createNewMeta() throws IOException {
+  private HRegion createNewMeta(String walFactoryID) throws IOException {
     Path rootdir = FSUtils.getRootDir(getConf());
     Configuration c = getConf();
     HRegionInfo metaHRI = new HRegionInfo(HRegionInfo.FIRST_META_REGIONINFO);
@@ -1346,9 +1403,8 @@ public class HBaseFsck extends Configured implements Closeable {
     Configuration confForWAL = new Configuration(c);
     confForWAL.set(HConstants.HBASE_DIR, rootdir.toString());
     WAL wal = (new WALFactory(confForWAL,
-        Collections.<WALActionsListener>singletonList(new MetricsWAL()),
-        "hbck-meta-recovery-" + RandomStringUtils.randomNumeric(8))).
-        getWAL(metaHRI.getEncodedNameAsBytes(), metaHRI.getTable().getNamespace());
+        Collections.<WALActionsListener> singletonList(new MetricsWAL()), walFactoryID))
+            .getWAL(metaHRI.getEncodedNameAsBytes(), metaHRI.getTable().getNamespace());
     HRegion meta = HRegion.createHRegion(metaHRI, rootdir, c, metaDescriptor, wal);
     MasterFileSystem.setInfoFamilyCachingForMeta(metaDescriptor, true);
     return meta;
@@ -1457,7 +1513,8 @@ public class HBaseFsck extends Configured implements Closeable {
     Path backupDir = sidelineOldMeta();
 
     LOG.info("Creating new hbase:meta");
-    HRegion meta = createNewMeta();
+    String walFactoryId = "hbck-meta-recovery-" + RandomStringUtils.randomNumeric(8);
+    HRegion meta = createNewMeta(walFactoryId);
 
     // populate meta
     List<Put> puts = generatePuts(tablesInfo);
@@ -1471,9 +1528,29 @@ public class HBaseFsck extends Configured implements Closeable {
     if (meta.getWAL() != null) {
       meta.getWAL().close();
     }
+    // clean up the temporary hbck meta recovery WAL directory
+    removeHBCKMetaRecoveryWALDir(walFactoryId);
     LOG.info("Success! hbase:meta table rebuilt.");
     LOG.info("Old hbase:meta is moved into " + backupDir);
     return true;
+  }
+
+  /**
+   * Removes the empty Meta recovery WAL directory.
+   * @param walFactoryID A unique identifier for WAL factory which was used by Filesystem to make a
+   *          Meta recovery WAL directory inside WAL directory path.
+   */
+  private void removeHBCKMetaRecoveryWALDir(String walFactoryId) throws IOException {
+    Path rootdir = FSUtils.getRootDir(getConf());
+    Path walLogDir = new Path(new Path(rootdir, HConstants.HREGION_LOGDIR_NAME), walFactoryId);
+    FileSystem fs = FSUtils.getCurrentFileSystem(getConf());
+    FileStatus[] walFiles = FSUtils.listStatus(fs, walLogDir, null);
+    if (walFiles == null || walFiles.length == 0) {
+      LOG.info("HBCK meta recovery WAL directory is empty, removing it now.");
+      if (!FSUtils.deleteDirectory(fs, walLogDir)) {
+        LOG.warn("Couldn't clear the HBCK Meta recovery WAL directory " + walLogDir);
+      }
+    }
   }
 
   /**
@@ -3350,7 +3427,7 @@ public class HBaseFsck extends Configured implements Closeable {
   private void unassignMetaReplica(HbckInfo hi) throws IOException, InterruptedException,
   KeeperException {
     undeployRegions(hi);
-    ZKUtil.deleteNode(zkw, zkw.getZNodeForReplica(hi.metaEntry.getReplicaId()));
+    ZKUtil.deleteNode(zkw, zkw.znodePaths.getZNodeForReplica(hi.metaEntry.getReplicaId()));
   }
 
   private void assignMetaReplica(int replicaId)
@@ -3380,7 +3457,7 @@ public class HBaseFsck extends Configured implements Closeable {
       final Comparator<Cell> comp = new Comparator<Cell>() {
         @Override
         public int compare(Cell k1, Cell k2) {
-          return (int)(k1.getTimestamp() - k2.getTimestamp());
+          return Long.compare(k1.getTimestamp(), k2.getTimestamp());
         }
       };
 
@@ -4216,43 +4293,6 @@ public class HBaseFsck extends Configured implements Closeable {
   }
 
   /**
-   * Disable the load balancer.
-   */
-  public static void setDisableBalancer() {
-    disableBalancer = true;
-  }
-
-  /**
-   * Disable the split and merge
-   */
-  public static void setDisableSplitAndMerge() {
-    setDisableSplitAndMerge(true);
-  }
-
-  @VisibleForTesting
-  public static void setDisableSplitAndMerge(boolean flag) {
-    disableSplitAndMerge = flag;
-  }
-
-  /**
-   * The balancer should be disabled if we are modifying HBase.
-   * It can be disabled if you want to prevent region movement from causing
-   * false positives.
-   */
-  public boolean shouldDisableBalancer() {
-    return fixAny || disableBalancer;
-  }
-
-  /**
-   * The split and merge should be disabled if we are modifying HBase.
-   * It can be disabled if you want to prevent region movement from causing
-   * false positives.
-   */
-  public boolean shouldDisableSplitAndMerge() {
-    return fixAny || disableSplitAndMerge;
-  }
-
-  /**
    * Set summary mode.
    * Print only summary of the tables and status (OK or INCONSISTENT)
    */
@@ -4513,7 +4553,6 @@ public class HBaseFsck extends Configured implements Closeable {
     out.println("   -sidelineDir <hdfs://> HDFS path to backup existing meta.");
     out.println("   -boundaries Verify that regions boundaries are the same between META and store files.");
     out.println("   -exclusive Abort if another hbck is exclusive or fixing.");
-    out.println("   -disableBalancer Disable the load balancer.");
 
     out.println("");
     out.println("  Metadata Repair options: (expert features, use with caution!)");
@@ -4609,10 +4648,6 @@ public class HBaseFsck extends Configured implements Closeable {
         setDisplayFullReport();
       } else if (cmd.equals("-exclusive")) {
         setForceExclusive();
-      } else if (cmd.equals("-disableBalancer")) {
-        setDisableBalancer();
-      }  else if (cmd.equals("-disableSplitAndMerge")) {
-        setDisableSplitAndMerge();
       } else if (cmd.equals("-timelag")) {
         if (i == args.length - 1) {
           errors.reportError(ERROR_CODE.WRONG_USAGE, "HBaseFsck: -timelag needs a value.");

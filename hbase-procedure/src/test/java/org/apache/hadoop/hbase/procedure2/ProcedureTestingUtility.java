@@ -31,15 +31,15 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
+import org.apache.hadoop.hbase.io.util.StreamUtils;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore.ProcedureIterator;
 import org.apache.hadoop.hbase.procedure2.store.NoopProcedureStore;
 import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
-import org.apache.hadoop.hbase.protobuf.generated.ErrorHandlingProtos.ForeignExceptionMessage;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureState;
+import org.apache.hadoop.hbase.util.Threads;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -87,6 +87,25 @@ public class ProcedureTestingUtility {
     // re-start
     procStore.start(storeThreads);
     procExecutor.start(execThreads, failOnCorrupted);
+  }
+
+  public static void storeRestart(ProcedureStore procStore, ProcedureStore.ProcedureLoader loader)
+      throws Exception {
+    procStore.stop(false);
+    procStore.start(procStore.getNumThreads());
+    procStore.recoverLease();
+    procStore.load(loader);
+  }
+
+  public static LoadCounter storeRestartAndAssert(ProcedureStore procStore, long maxProcId,
+      long runnableCount, int completedCount, int corruptedCount) throws Exception {
+    final LoadCounter loader = new LoadCounter();
+    storeRestart(procStore, loader);
+    assertEquals(maxProcId, loader.getMaxProcId());
+    assertEquals(runnableCount, loader.getRunnableCount());
+    assertEquals(completedCount, loader.getCompletedCount());
+    assertEquals(corruptedCount, loader.getCorruptedCount());
+    return loader;
   }
 
   public static <TEnv> void setKillBeforeStoreUpdate(ProcedureExecutor<TEnv> procExecutor,
@@ -162,7 +181,7 @@ public class ProcedureTestingUtility {
   public static <TEnv> void waitNoProcedureRunning(ProcedureExecutor<TEnv> procExecutor) {
     int stableRuns = 0;
     while (stableRuns < 10) {
-      if (procExecutor.getActiveExecutorCount() > 0 || procExecutor.getRunnableSet().size() > 0) {
+      if (procExecutor.getActiveExecutorCount() > 0 || procExecutor.getScheduler().size() > 0) {
         stableRuns = 0;
         Threads.sleepWithoutInterrupt(100);
       } else {
@@ -186,43 +205,65 @@ public class ProcedureTestingUtility {
   }
 
   public static void assertProcNotFailed(final ProcedureInfo result) {
-    if (result.getForeignExceptionMessage() != null) {
-      ForeignExceptionMessage exception =
-          result.getForeignExceptionMessage().getForeignExchangeMessage();
-      String msg = exception != null ? result.getExceptionFullMessage() : "no exception found";
-      assertFalse(msg, result.isFailed());
-    }
+    assertFalse("found exception: " + result.getException(), result.isFailed());
   }
 
   public static void assertIsAbortException(final ProcedureInfo result) {
     assertEquals(true, result.isFailed());
-    LOG.info(result.getExceptionFullMessage());
-    Throwable cause = getExceptionCause(result);
+    LOG.info(result.getException().getMessage());
+    Throwable cause = result.getException().getCause();
     assertTrue("expected abort exception, got "+ cause, cause instanceof ProcedureAbortedException);
   }
 
   public static void assertIsTimeoutException(final ProcedureInfo result) {
     assertEquals(true, result.isFailed());
-    LOG.info(result.getExceptionFullMessage());
-    Throwable cause = getExceptionCause(result);
+    LOG.info(result.getException().getMessage());
+    Throwable cause = result.getException();
     assertTrue("expected TimeoutIOException, got " + cause, cause instanceof TimeoutIOException);
   }
 
   public static void assertIsIllegalArgumentException(final ProcedureInfo result) {
     assertEquals(true, result.isFailed());
-    LOG.info(result.getExceptionFullMessage());
-    Throwable cause = ProcedureTestingUtility.getExceptionCause(result);
+    LOG.info(result.getException().getMessage());
+    Throwable cause = getExceptionCause(result);
     assertTrue("expected IllegalArgumentIOException, got " + cause,
       cause instanceof IllegalArgumentIOException);
   }
 
   public static Throwable getExceptionCause(final ProcedureInfo procInfo) {
-    assert procInfo.getForeignExceptionMessage() != null;
-    return RemoteProcedureException
-        .fromProto(procInfo.getForeignExceptionMessage().getForeignExchangeMessage()).getCause();
+    assert procInfo.isFailed();
+    Throwable cause = procInfo.getException().getCause();
+    return cause == null ? procInfo.getException() : cause;
   }
 
-  public static class TestProcedure extends Procedure<Void> {
+  public static class NoopProcedure<TEnv> extends Procedure<TEnv> {
+    public NoopProcedure() {}
+
+    @Override
+    protected Procedure[] execute(TEnv env)
+        throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
+      return null;
+    }
+
+    @Override
+    protected void rollback(TEnv env) throws IOException, InterruptedException {
+    }
+
+    @Override
+    protected boolean abort(TEnv env) { return false; }
+
+    @Override
+    protected void serializeStateData(final OutputStream stream) throws IOException {
+    }
+
+    @Override
+    protected void deserializeStateData(final InputStream stream) throws IOException {
+    }
+  }
+
+  public static class TestProcedure extends NoopProcedure<Void> {
+    private byte[] data = null;
+
     public TestProcedure() {}
 
     public TestProcedure(long procId) {
@@ -230,6 +271,11 @@ public class ProcedureTestingUtility {
     }
 
     public TestProcedure(long procId, long parentId) {
+      this(procId, parentId, null);
+    }
+
+    public TestProcedure(long procId, long parentId, byte[] data) {
+      setData(data);
       setProcId(procId);
       if (parentId > 0) {
         setParentProcId(parentId);
@@ -244,20 +290,37 @@ public class ProcedureTestingUtility {
       setState(ProcedureState.FINISHED);
     }
 
-    @Override
-    protected Procedure[] execute(Void env) { return null; }
+    public void setData(final byte[] data) {
+      this.data = data;
+    }
 
     @Override
-    protected void rollback(Void env) { }
+    protected void serializeStateData(final OutputStream stream) throws IOException {
+      StreamUtils.writeRawVInt32(stream, data != null ? data.length : 0);
+      if (data != null) stream.write(data);
+    }
 
     @Override
-    protected boolean abort(Void env) { return false; }
+    protected void deserializeStateData(final InputStream stream) throws IOException {
+      int len = StreamUtils.readRawVarint32(stream);
+      if (len > 0) {
+        data = new byte[len];
+        stream.read(data);
+      } else {
+        data = null;
+      }
+    }
+
+    // Mark acquire/release lock functions public for test uses.
+    @Override
+    public boolean acquireLock(Void env) {
+      return true;
+    }
 
     @Override
-    protected void serializeStateData(final OutputStream stream) throws IOException { }
-
-    @Override
-    protected void deserializeStateData(final InputStream stream) throws IOException { }
+    public void releaseLock(Void env) {
+      // no-op
+    }
   }
 
   public static class LoadCounter implements ProcedureStore.ProcedureLoader {
@@ -318,6 +381,15 @@ public class ProcedureTestingUtility {
 
     public int getCorruptedCount() {
       return corrupted.size();
+    }
+
+    public boolean isRunnable(final long procId) {
+      for (Procedure proc: runnable) {
+        if (proc.getProcId() == procId) {
+          return true;
+        }
+      }
+      return false;
     }
 
     @Override

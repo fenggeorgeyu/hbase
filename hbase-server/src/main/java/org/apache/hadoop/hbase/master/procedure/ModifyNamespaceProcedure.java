@@ -21,30 +21,24 @@ package org.apache.hadoop.hbase.master.procedure;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
-import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.master.TableNamespaceManager;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.ModifyNamespaceState;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ModifyNamespaceState;
 
 /**
  * The procedure to add a namespace to an existing table.
  */
 @InterfaceAudience.Private
 public class ModifyNamespaceProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, ModifyNamespaceState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineNamespaceProcedure<ModifyNamespaceState> {
   private static final Log LOG = LogFactory.getLog(ModifyNamespaceProcedure.class);
-
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
 
   private NamespaceDescriptor oldNsDescriptor;
   private NamespaceDescriptor newNsDescriptor;
@@ -55,13 +49,12 @@ public class ModifyNamespaceProcedure
     this.traceEnabled = null;
   }
 
-  public ModifyNamespaceProcedure(
-      final MasterProcedureEnv env,
-      final NamespaceDescriptor newNsDescriptor) throws IOException {
+  public ModifyNamespaceProcedure(final MasterProcedureEnv env,
+      final NamespaceDescriptor newNsDescriptor) {
+    super(env);
     this.oldNsDescriptor = null;
     this.newNsDescriptor = newNsDescriptor;
     this.traceEnabled = null;
-    this.setOwner(env.getRequestUser().getUGI().getShortUserName());
   }
 
   @Override
@@ -88,10 +81,12 @@ public class ModifyNamespaceProcedure
         throw new UnsupportedOperationException(this + " unhandled state=" + state);
       }
     } catch (IOException e) {
-      LOG.warn("Error trying to modify the namespace" + newNsDescriptor.getName()
-        + " (in state=" + state + ")", e);
-
-      setFailure("master-modify-namespace", e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-modify-namespace", e);
+      } else {
+        LOG.warn("Retriable error trying to modify namespace=" + newNsDescriptor.getName() +
+          " (in state=" + state + ")", e);
+      }
     }
     return Flow.HAS_MORE_STATE;
   }
@@ -99,28 +94,23 @@ public class ModifyNamespaceProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final ModifyNamespaceState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
+    if (state == ModifyNamespaceState.MODIFY_NAMESPACE_PREPARE) {
+      // nothing to rollback, pre-modify is just checks.
+      // TODO: coprocessor rollback semantic is still undefined.
+      return;
     }
-    try {
-      switch (state) {
-      case MODIFY_NAMESPACE_UPDATE_ZK:
-        rollbackZKNamespaceManagerChange(env);
-        break;
-      case MODIFY_NAMESPACE_UPDATE_NS_TABLE:
-        rollbackUpdateInNSTable(env);
-        break;
+
+    // The procedure doesn't have a rollback. The execution will succeed, at some point.
+    throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final ModifyNamespaceState state) {
+    switch (state) {
       case MODIFY_NAMESPACE_PREPARE:
-        break; // nothing to do
+        return true;
       default:
-        throw new UnsupportedOperationException(this + " unhandled state=" + state);
-      }
-    } catch (IOException e) {
-      // This will be retried. Unless there is a bug in the code,
-      // this should be just a "temporary error" (e.g. network down)
-      LOG.warn("Failed rollback attempt step " + state + " for creating the namespace "
-          + newNsDescriptor.getName(), e);
-      throw e;
+        return false;
     }
   }
 
@@ -137,21 +127,6 @@ public class ModifyNamespaceProcedure
   @Override
   protected ModifyNamespaceState getInitialState() {
     return ModifyNamespaceState.MODIFY_NAMESPACE_PREPARE;
-  }
-
-  @Override
-  protected void setNextState(ModifyNamespaceState state) {
-    if (aborted.get()) {
-      setAbortFailure("modify-namespace", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
   }
 
   @Override
@@ -183,35 +158,12 @@ public class ModifyNamespaceProcedure
   }
 
   @Override
-  public void toStringClassDetails(StringBuilder sb) {
-    sb.append(getClass().getSimpleName());
-    sb.append(" (Namespace=");
-    sb.append(newNsDescriptor.getName());
-    sb.append(")");
-  }
-
-  @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireNamespaceExclusiveLock(this, getNamespaceName());
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseNamespaceExclusiveLock(this, getNamespaceName());
-  }
-
-  @Override
-  public TableName getTableName() {
-    return TableName.NAMESPACE_TABLE_NAME;
-  }
-
-  @Override
   public TableOperationType getTableOperationType() {
     return TableOperationType.EDIT;
   }
 
-  private String getNamespaceName() {
+  @Override
+  protected String getNamespaceName() {
     return newNsDescriptor.getName();
   }
 
@@ -240,34 +192,12 @@ public class ModifyNamespaceProcedure
   }
 
   /**
-   * rollback the row into namespace table
-   * @param env MasterProcedureEnv
-   * @throws IOException
-   */
-  private void rollbackUpdateInNSTable(final MasterProcedureEnv env) throws IOException {
-    if (oldNsDescriptor != null) {
-      getTableNamespaceManager(env).insertIntoNSTable(oldNsDescriptor);
-    }
-  }
-
-  /**
    * Update ZooKeeper.
    * @param env MasterProcedureEnv
    * @throws IOException
    */
   private void updateZKNamespaceManager(final MasterProcedureEnv env) throws IOException {
     getTableNamespaceManager(env).updateZKNamespaceManager(newNsDescriptor);
-  }
-
-  /**
-   * Update ZooKeeper during undo.
-   * @param env MasterProcedureEnv
-   * @throws IOException
-   */
-  private void rollbackZKNamespaceManagerChange(final MasterProcedureEnv env) throws IOException {
-    if (oldNsDescriptor != null) {
-      getTableNamespaceManager(env).updateZKNamespaceManager(oldNsDescriptor);
-    }
   }
 
   private TableNamespaceManager getTableNamespaceManager(final MasterProcedureEnv env) {

@@ -26,9 +26,11 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 
 /**
  * High scalable counter. Thread safe.
+ * @deprecated use {@link java.util.concurrent.atomic.LongAdder} instead.
  */
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
+@Deprecated
 public class Counter {
   private static final int MAX_CELLS_LENGTH = 1 << 20;
 
@@ -108,25 +110,12 @@ public class Counter {
     return h;
   }
 
-  private static class IndexHolder {
-    int index = hash();
-  }
-
-  private final ThreadLocal<IndexHolder> indexHolderThreadLocal =
-      new ThreadLocal<IndexHolder>() {
-    @Override
-    protected IndexHolder initialValue() {
-      return new IndexHolder();
-    }
-  };
-
   public void add(long delta) {
     Container container = containerRef.get();
     Cell[] cells = container.cells;
     int mask = cells.length - 1;
 
-    IndexHolder indexHolder = indexHolderThreadLocal.get();
-    int baseIndex = indexHolder.index;
+    int baseIndex = hash();
     if(cells[baseIndex & mask].add(delta)) {
       return;
     }
@@ -138,8 +127,6 @@ public class Counter {
       }
       index++;
     }
-
-    indexHolder.index = index;
 
     if(index - baseIndex >= cells.length &&
         cells.length < MAX_CELLS_LENGTH &&

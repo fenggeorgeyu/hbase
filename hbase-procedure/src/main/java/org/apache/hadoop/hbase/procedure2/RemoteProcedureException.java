@@ -22,10 +22,8 @@ import java.io.IOException;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.protobuf.generated.ErrorHandlingProtos.ForeignExceptionMessage;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ErrorHandlingProtos.ForeignExceptionMessage;
 import org.apache.hadoop.hbase.util.ForeignExceptionUtil;
-
-import com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * A RemoteProcedureException is an exception from another thread or process.
@@ -65,14 +63,23 @@ public class RemoteProcedureException extends ProcedureException {
     return source;
   }
 
-  public IOException unwrapRemoteException() {
-    if (getCause() instanceof RemoteException) {
-      return ((RemoteException)getCause()).unwrapRemoteException();
+  public Exception unwrapRemoteException() {
+    final Throwable cause = getCause();
+    if (cause instanceof RemoteException) {
+      return ((RemoteException)cause).unwrapRemoteException();
     }
-    if (getCause() instanceof IOException) {
-      return (IOException)getCause();
+    if (cause instanceof Exception) {
+      return (Exception)cause;
     }
-    return new IOException(getCause());
+    return new Exception(cause);
+  }
+
+  public IOException unwrapRemoteIOException() {
+    final Exception cause = unwrapRemoteException();
+    if (cause instanceof IOException) {
+      return (IOException)cause;
+    }
+    return new IOException(cause);
   }
 
   @Override
@@ -97,8 +104,7 @@ public class RemoteProcedureException extends ProcedureException {
    * @return the ForeignExcpetion instance
    * @throws InvalidProtocolBufferException if there was deserialization problem this is thrown.
    */
-  public static RemoteProcedureException deserialize(byte[] bytes)
-      throws InvalidProtocolBufferException {
+  public static RemoteProcedureException deserialize(byte[] bytes) throws IOException {
     return fromProto(ForeignExceptionMessage.parseFrom(bytes));
   }
 
@@ -111,6 +117,6 @@ public class RemoteProcedureException extends ProcedureException {
   }
 
   public static RemoteProcedureException fromProto(final ForeignExceptionMessage eem) {
-    return new RemoteProcedureException(eem.getSource(), ForeignExceptionUtil.toIOException(eem));
+    return new RemoteProcedureException(eem.getSource(), ForeignExceptionUtil.toException(eem));
   }
 }

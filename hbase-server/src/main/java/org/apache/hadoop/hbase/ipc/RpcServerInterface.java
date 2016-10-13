@@ -31,10 +31,10 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.security.authorize.PolicyProvider;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.BlockingService;
-import com.google.protobuf.Descriptors.MethodDescriptor;
-import com.google.protobuf.Message;
-import com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.BlockingService;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.Descriptors.MethodDescriptor;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
 
 @InterfaceAudience.LimitedPrivate({HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX})
 @InterfaceStability.Evolving
@@ -48,14 +48,17 @@ public interface RpcServerInterface {
   void setSocketSendBufSize(int size);
   InetSocketAddress getListenerAddress();
 
+  /**
+   * @deprecated As of release 1.3, this will be removed in HBase 3.0
+   */
+  @Deprecated
   Pair<Message, CellScanner> call(BlockingService service, MethodDescriptor md,
     Message param, CellScanner cellScanner, long receiveTime, MonitoredRPCHandler status)
   throws IOException, ServiceException;
 
-  Pair<Message, CellScanner> call(BlockingService service, MethodDescriptor md,
-      Message param, CellScanner cellScanner, long receiveTime, MonitoredRPCHandler status,
-      int timeout)
-      throws IOException, ServiceException;
+  Pair<Message, CellScanner> call(BlockingService service, MethodDescriptor md, Message param,
+      CellScanner cellScanner, long receiveTime, MonitoredRPCHandler status, long startTime,
+      int timeout) throws IOException, ServiceException;
 
   void setErrorHandler(HBaseRPCErrorHandler handler);
   HBaseRPCErrorHandler getErrorHandler();

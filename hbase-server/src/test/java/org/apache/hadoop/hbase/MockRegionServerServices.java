@@ -19,6 +19,7 @@ package org.apache.hadoop.hbase;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,7 +37,8 @@ import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.ipc.RpcServerInterface;
 import org.apache.hadoop.hbase.master.TableLockManager;
 import org.apache.hadoop.hbase.master.TableLockManager.NullTableLockManager;
-import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 import org.apache.hadoop.hbase.quotas.RegionServerQuotaManager;
 import org.apache.hadoop.hbase.regionserver.CompactionRequestor;
 import org.apache.hadoop.hbase.regionserver.FlushRequester;
@@ -46,6 +48,7 @@ import org.apache.hadoop.hbase.regionserver.MetricsRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionServerAccounting;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
+import org.apache.hadoop.hbase.regionserver.SecureBulkLoadManager;
 import org.apache.hadoop.hbase.regionserver.ServerNonceManager;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -245,6 +248,11 @@ public class MockRegionServerServices implements RegionServerServices {
   }
 
   @Override
+  public List<WAL> getWALs() throws IOException {
+    return Collections.emptyList();
+  }
+
+  @Override
   public WAL getWAL(HRegionInfo regionInfo) throws IOException {
     return null;
   }
@@ -261,7 +269,7 @@ public class MockRegionServerServices implements RegionServerServices {
 
   @Override
   public void updateRegionFavoredNodesMapping(String encodedRegionName,
-      List<org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.ServerName> favoredNodes) {
+      List<HBaseProtos.ServerName> favoredNodes) {
   }
 
   @Override
@@ -316,7 +324,6 @@ public class MockRegionServerServices implements RegionServerServices {
 
   @Override
   public ClusterConnection getClusterConnection() {
-    // TODO Auto-generated method stub
     return null;
   }
 
@@ -332,6 +339,11 @@ public class MockRegionServerServices implements RegionServerServices {
 
   @Override
   public MetricsRegionServer getMetrics() {
+    return null;
+  }
+
+  @Override
+  public SecureBulkLoadManager getSecureBulkLoadManager() {
     return null;
   }
 }

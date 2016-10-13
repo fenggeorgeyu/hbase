@@ -43,11 +43,11 @@ import org.apache.hadoop.hbase.master.RegionState;
 import org.apache.hadoop.hbase.master.RegionStates;
 import org.apache.hadoop.hbase.procedure2.ProcedureYieldException;
 import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionInfo;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.ServerCrashState;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionInfo;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ServerCrashState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.util.StringUtils;
@@ -145,12 +145,15 @@ implements ServerProcedureInterface {
    * @param shouldSplitWal True if we should split WALs as part of crashed server processing.
    * @param carryingMeta True if carrying hbase:meta table region.
    */
-  public ServerCrashProcedure(final ServerName serverName,
-      final boolean shouldSplitWal, final boolean carryingMeta) {
+  public ServerCrashProcedure(
+      final MasterProcedureEnv env,
+      final ServerName serverName,
+      final boolean shouldSplitWal,
+      final boolean carryingMeta) {
     this.serverName = serverName;
     this.shouldSplitWal = shouldSplitWal;
     this.carryingMeta = carryingMeta;
-    // Currently not used.
+    this.setOwner(env.getRequestUser().getShortName());
   }
 
   /**
@@ -300,10 +303,6 @@ implements ServerProcedureInterface {
       default:
         throw new UnsupportedOperationException("unhandled state=" + state);
       }
-    } catch (ProcedureYieldException e) {
-      LOG.warn("Failed serverName=" + this.serverName + ", state=" + state + "; retry "
-          + e.getMessage());
-      throw e;
     } catch (IOException e) {
       LOG.warn("Failed serverName=" + this.serverName + ", state=" + state + "; retry", e);
     } catch (InterruptedException e) {

@@ -1,15 +1,23 @@
-These are the protobuf definition files used by hbase. The produced java
-classes are generated into src/main/java/org/apache/hadoop/hbase/protobuf/generated
-and then checked in.  The reasoning is that they change infrequently.
+These are the protobuf definition files used by hbase Coprocessor Endpoints.
+HBase core uses protos found at hbase-protocol-shaded/src/main/protos. The
+protos here are also in hbase-module-shaded though they are not exactly
+the same files (they generate into different location; where to generate
+to is part of the .proto file). Consider whether any changes made belong
+both here and over in hbase-module-shaded.
+
+The produced java classes are generated and then checked in. The reasoning
+is that they change infrequently and it saves generating anew on each build.
 
 To regenerate the classes after making definition file changes, ensure first that
-the protobuf protoc tool is in your $PATH (You may need to download it and build
-it first; its part of the protobuf package obtainable from here: 
-https://github.com/google/protobuf/releases/tag/v2.5.0).
+the protobuf protoc tool is in your $PATH. You may need to download it and build
+it first; its part of the protobuf package. For example, if using v2.5.0 of
+protobuf, it is obtainable from here:
 
-HBase uses hadoop-maven-plugins:protoc goal to invoke the protoc command. You can 
-compile the protoc definitions by invoking maven with profile compile-protobuf or 
-passing in compile-protobuf property. 
+ https://github.com/google/protobuf/releases/tag/v2.5.0
+
+HBase uses hadoop-maven-plugins:protoc goal to invoke the protoc command. You can
+compile the protoc definitions by invoking maven with profile compile-protobuf or
+passing in compile-protobuf property.
 
 mvn compile -Dcompile-protobuf
 or
@@ -24,4 +32,3 @@ Other modules also support the maven profile.
 
 After you've done the above, check it in and then check it in (or post a patch
 on a JIRA with your definition file changes and the generated files).
-

@@ -32,6 +32,7 @@ import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
+import org.apache.hadoop.hbase.NamespaceNotFoundException;
 import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableExistsException;
@@ -506,6 +507,16 @@ public interface Admin extends Abortable, Closeable {
     throws IOException;
 
   /**
+   * Add a column family to an existing table.
+   *
+   * @param tableName name of the table to add column family to
+   * @param columnFamily column family descriptor of column family to be added
+   * @throws IOException if a remote or network exception occurs
+   */
+  void addColumnFamily(final TableName tableName, final HColumnDescriptor columnFamily)
+    throws IOException;
+
+  /**
    * Add a column family to an existing table. Asynchronous operation.
    * You can use Future.get(long, TimeUnit) to wait on the operation to complete.
    * It may throw ExecutionException if there was an error while executing the operation
@@ -518,7 +529,7 @@ public interface Admin extends Abortable, Closeable {
    * @return the result of the async add column family. You can use Future.get(long, TimeUnit) to
    *         wait on the operation to complete.
    */
-  Future<Void> addColumnFamily(final TableName tableName, final HColumnDescriptor columnFamily)
+  Future<Void> addColumnFamilyAsync(final TableName tableName, final HColumnDescriptor columnFamily)
       throws IOException;
 
   /**
@@ -537,6 +548,15 @@ public interface Admin extends Abortable, Closeable {
 
   /**
    * Delete a column family from a table. Asynchronous operation.
+   *
+   * @param tableName name of table
+   * @param columnFamily name of column family to be deleted
+   * @throws IOException if a remote or network exception occurs
+   */
+  void deleteColumnFamily(final TableName tableName, final byte[] columnFamily) throws IOException;
+
+  /**
+   * Delete a column family from a table. Asynchronous operation.
    * You can use Future.get(long, TimeUnit) to wait on the operation to complete.
    * It may throw ExecutionException if there was an error while executing the operation
    * or TimeoutException in case the wait timeout was not long enough to allow the
@@ -548,15 +568,11 @@ public interface Admin extends Abortable, Closeable {
    * @return the result of the async delete column family. You can use Future.get(long, TimeUnit) to
    *         wait on the operation to complete.
    */
-  Future<Void> deleteColumnFamily(final TableName tableName, final byte[] columnFamily)
+  Future<Void> deleteColumnFamilyAsync(final TableName tableName, final byte[] columnFamily)
       throws IOException;
 
   /**
-   * Modify an existing column family on a table. Asynchronous operation.
-   * You can use Future.get(long, TimeUnit) to wait on the operation to complete.
-   * It may throw ExecutionException if there was an error while executing the operation
-   * or TimeoutException in case the wait timeout was not long enough to allow the
-   * operation to complete.
+   * Modify an existing column family on a table.
    *
    * @param tableName name of table
    * @param columnFamily new column family descriptor to use
@@ -571,7 +587,21 @@ public interface Admin extends Abortable, Closeable {
       throws IOException;
 
   /**
+   * Modify an existing column family on a table.
+   *
+   * @param tableName name of table
+   * @param columnFamily new column family descriptor to use
+   * @throws IOException if a remote or network exception occurs
+   */
+  void modifyColumnFamily(final TableName tableName, final HColumnDescriptor columnFamily)
+      throws IOException;
+
+  /**
    * Modify an existing column family on a table. Asynchronous operation.
+   * You can use Future.get(long, TimeUnit) to wait on the operation to complete.
+   * It may throw ExecutionException if there was an error while executing the operation
+   * or TimeoutException in case the wait timeout was not long enough to allow the
+   * operation to complete.
    *
    * @param tableName name of table
    * @param columnFamily new column family descriptor to use
@@ -579,7 +609,7 @@ public interface Admin extends Abortable, Closeable {
    * @return the result of the async modify column family. You can use Future.get(long, TimeUnit) to
    *         wait on the operation to complete.
    */
-  Future<Void> modifyColumnFamily(final TableName tableName, final HColumnDescriptor columnFamily)
+  Future<Void> modifyColumnFamilyAsync(TableName tableName, HColumnDescriptor columnFamily)
       throws IOException;
 
 
@@ -927,6 +957,16 @@ public interface Admin extends Abortable, Closeable {
     throws IOException;
 
   /**
+   * Modify an existing table, more IRB friendly version.
+   *
+   * @param tableName name of table.
+   * @param htd modified description of the table
+   * @throws IOException if a remote or network exception occurs
+   */
+  void modifyTable(final TableName tableName, final HTableDescriptor htd)
+      throws IOException;
+
+  /**
    * Modify an existing table, more IRB friendly version. Asynchronous operation.  This means that
    * it may be a while before your schema change is updated across all of the table.
    * You can use Future.get(long, TimeUnit) to wait on the operation to complete.
@@ -940,7 +980,7 @@ public interface Admin extends Abortable, Closeable {
    * @return the result of the async modify. You can use Future.get(long, TimeUnit) to wait on the
    *     operation to complete
    */
-  Future<Void> modifyTable(final TableName tableName, final HTableDescriptor htd)
+  Future<Void> modifyTableAsync(final TableName tableName, final HTableDescriptor htd)
       throws IOException;
 
   /**
@@ -957,6 +997,13 @@ public interface Admin extends Abortable, Closeable {
    * @see #shutdown()
    */
   void stopMaster() throws IOException;
+
+  /**
+   * Check whether Master is in maintenance mode
+   *
+   * @throws IOException if a remote or network exception occurs
+   */
+  boolean isMasterInMaintenanceMode()  throws IOException;
 
   /**
    * Stop the designated regionserver
@@ -1039,9 +1086,11 @@ public interface Admin extends Abortable, Closeable {
    *
    * @param name name of namespace descriptor
    * @return A descriptor
+   * @throws org.apache.hadoop.hbase.NamespaceNotFoundException
+   * @throws IOException if a remote or network exception occurs
    */
   NamespaceDescriptor getNamespaceDescriptor(final String name)
-  throws IOException;
+  throws NamespaceNotFoundException, IOException;
 
   /**
    * List available namespace descriptors
@@ -1729,15 +1778,10 @@ public interface Admin extends Abortable, Closeable {
    *
    * @param enabled enabled or not
    * @param synchronous If true, it waits until current split() call, if outstanding, to return.
-   * @param skipLock if false, we will do lock before change switch.
-   *                 with the lock, other requests to change the switch will be rejected!
-   *                 And when you set it to be false,
-   *                 you should call {@link #releaseSplitOrMergeLockAndRollback()} by yourself
    * @param switchTypes switchType list {@link MasterSwitchType}
    * @return Previous switch value array
    */
   boolean[] setSplitOrMergeEnabled(final boolean enabled, final boolean synchronous,
-                                   final boolean skipLock,
                                    final MasterSwitchType... switchTypes) throws IOException;
 
   /**
@@ -1746,12 +1790,4 @@ public interface Admin extends Abortable, Closeable {
    * @return true if the switch is enabled, false otherwise.
    */
   boolean isSplitOrMergeEnabled(final MasterSwitchType switchType) throws IOException;
-
-  /**
-   *  You should call this method after you call
-   *  {@link #setSplitOrMergeEnabled(boolean, boolean, boolean, MasterSwitchType...)}
-   *  with skipLock be false, this method will release the lock created by above method
-   *  and rollback the switch state to be original state before you change switch
-   * */
-  void releaseSplitOrMergeLockAndRollback() throws IOException;
 }

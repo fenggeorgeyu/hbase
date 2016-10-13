@@ -29,6 +29,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 
+
 /**
  * Class for determining the "size" of a class, an attempt to calculate the
  * actual bytes that an object of this class will occupy in memory
@@ -44,6 +45,12 @@ public class ClassSize {
 
   /** Overhead for ArrayList(0) */
   public static final int ARRAYLIST;
+
+  /** Overhead for LinkedList(0) */
+  public static final int LINKEDLIST;
+
+  /** Overhead for a single entry in LinkedList */
+  public static final int LINKEDLIST_ENTRY;
 
   /** Overhead for ByteBuffer */
   public static final int BYTE_BUFFER;
@@ -81,6 +88,12 @@ public class ClassSize {
   /** Overhead for ConcurrentSkipListMap Entry */
   public static final int CONCURRENT_SKIPLISTMAP_ENTRY;
 
+  /** Overhead for CellArrayMap */
+  public static final int CELL_ARRAY_MAP;
+
+  /** Overhead for Cell Array Entry */
+  public static final int CELL_ARRAY_MAP_ENTRY;
+
   /** Overhead for ReentrantReadWriteLock */
   public static final int REENTRANT_LOCK;
 
@@ -92,6 +105,9 @@ public class ClassSize {
 
   /** Overhead for AtomicBoolean */
   public static final int ATOMIC_BOOLEAN;
+
+  /** Overhead for AtomicReference */
+  public static final int ATOMIC_REFERENCE;
 
   /** Overhead for CopyOnWriteArraySet */
   public static final int COPYONWRITE_ARRAYSET;
@@ -106,7 +122,7 @@ public class ClassSize {
   public static final int TIMERANGE_TRACKER;
 
   /** Overhead for CellSkipListSet */
-  public static final int CELL_SKIPLIST_SET;
+  public static final int CELL_SET;
 
   public static final int STORE_SERVICES;
 
@@ -233,6 +249,10 @@ public class ClassSize {
 
     ARRAYLIST = align(OBJECT + REFERENCE + (2 * Bytes.SIZEOF_INT)) + align(ARRAY);
 
+    LINKEDLIST = align(OBJECT + (2 * Bytes.SIZEOF_INT) + (2 * REFERENCE));
+
+    LINKEDLIST_ENTRY = align(OBJECT + (2 * REFERENCE));
+
     //noinspection PointlessArithmeticExpression
     BYTE_BUFFER = align(OBJECT + REFERENCE +
         (5 * Bytes.SIZEOF_INT) +
@@ -262,9 +282,20 @@ public class ClassSize {
     // The size changes from jdk7 to jdk8, estimate the size rather than use a conditional
     CONCURRENT_SKIPLISTMAP = (int) estimateBase(ConcurrentSkipListMap.class, false);
 
-    CONCURRENT_SKIPLISTMAP_ENTRY =
+    // CELL_ARRAY_MAP is the size of an instance of CellArrayMap class, which extends
+    // CellFlatMap class. CellArrayMap object containing a ref to an Array, so
+    // OBJECT + REFERENCE + ARRAY
+    // CellFlatMap object contains two integers, one boolean and one reference to object, so
+    // 2*INT + BOOLEAN + REFERENCE
+    CELL_ARRAY_MAP = align(OBJECT + 2*Bytes.SIZEOF_INT + Bytes.SIZEOF_BOOLEAN
+        + ARRAY + 2*REFERENCE);
+
+    CONCURRENT_SKIPLISTMAP_ENTRY = align(
         align(OBJECT + (3 * REFERENCE)) + /* one node per entry */
-        align((OBJECT + (3 * REFERENCE))/2); /* one index per two entries */
+        align((OBJECT + (3 * REFERENCE))/2)); /* one index per two entries */
+
+    // REFERENCE in the CellArrayMap all the rest is counted in KeyValue.heapSize()
+    CELL_ARRAY_MAP_ENTRY = align(REFERENCE);
 
     REENTRANT_LOCK = align(OBJECT + (3 * REFERENCE));
 
@@ -274,6 +305,8 @@ public class ClassSize {
 
     ATOMIC_BOOLEAN = align(OBJECT + Bytes.SIZEOF_BOOLEAN);
 
+    ATOMIC_REFERENCE = align(OBJECT + REFERENCE);
+
     COPYONWRITE_ARRAYSET = align(OBJECT + REFERENCE);
 
     COPYONWRITE_ARRAYLIST = align(OBJECT + (2 * REFERENCE) + ARRAY);
@@ -282,7 +315,7 @@ public class ClassSize {
 
     TIMERANGE_TRACKER = align(ClassSize.OBJECT + Bytes.SIZEOF_LONG * 2);
 
-    CELL_SKIPLIST_SET = align(OBJECT + REFERENCE);
+    CELL_SET = align(OBJECT + REFERENCE);
 
     STORE_SERVICES = align(OBJECT + REFERENCE + ATOMIC_LONG);
   }

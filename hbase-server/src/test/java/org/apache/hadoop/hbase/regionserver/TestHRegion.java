@@ -18,10 +18,31 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.protobuf.ByteString;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.COLUMNS;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.FIRST_CHAR;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.LAST_CHAR;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.START_KEY;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.fam1;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.fam2;
+import static org.apache.hadoop.hbase.HBaseTestingUtility.fam3;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.anyLong;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.security.PrivilegedExceptionAction;
@@ -90,7 +111,6 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.client.TestMobSnapshotCloneIndependence;
 import org.apache.hadoop.hbase.exceptions.FailedSanityCheckException;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.ColumnCountGetFilter;
@@ -103,17 +123,16 @@ import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.SingleColumnValueExcludeFilter;
 import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
 import org.apache.hadoop.hbase.io.hfile.HFile;
-import org.apache.hadoop.hbase.master.procedure.TestMasterFailoverWithProcedures;
 import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.CompactionDescriptor;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.FlushDescriptor;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.FlushDescriptor.FlushAction;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.FlushDescriptor.StoreFlushDescriptor;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.RegionEventDescriptor;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos.StoreDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.CompactionDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.FlushDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.FlushDescriptor.FlushAction;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.FlushDescriptor.StoreFlushDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.RegionEventDescriptor;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.StoreDescriptor;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScannerImpl;
 import org.apache.hadoop.hbase.regionserver.Region.RowLock;
 import org.apache.hadoop.hbase.regionserver.TestStore.FaultyFileSystem;
@@ -126,6 +145,7 @@ import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
 import org.apache.hadoop.hbase.security.User;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString;
 import org.apache.hadoop.hbase.test.MetricsAssertHelper;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.VerySlowRegionServerTests;
@@ -161,30 +181,9 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import static org.apache.hadoop.hbase.HBaseTestingUtility.COLUMNS;
-import static org.apache.hadoop.hbase.HBaseTestingUtility.FIRST_CHAR;
-import static org.apache.hadoop.hbase.HBaseTestingUtility.LAST_CHAR;
-import static org.apache.hadoop.hbase.HBaseTestingUtility.START_KEY;
-import static org.apache.hadoop.hbase.HBaseTestingUtility.fam1;
-import static org.apache.hadoop.hbase.HBaseTestingUtility.fam2;
-import static org.apache.hadoop.hbase.HBaseTestingUtility.fam3;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 
 /**
  * Basic stand-alone testing of HRegion.  No clusters!
@@ -3769,8 +3768,8 @@ public class TestHRegion {
 
     String method = "testFlushCacheWhileScanning";
     this.region = initHRegion(tableName, method, CONF, family);
+    FlushThread flushThread = new FlushThread();
     try {
-      FlushThread flushThread = new FlushThread();
       flushThread.start();
 
       Scan scan = new Scan();
@@ -3789,7 +3788,7 @@ public class TestHRegion {
         region.put(put);
 
         if (i != 0 && i % compactInterval == 0) {
-          // System.out.println("iteration = " + i);
+          LOG.debug("iteration = " + i+ " ts="+System.currentTimeMillis());
           region.compact(true);
         }
 
@@ -3808,15 +3807,20 @@ public class TestHRegion {
           if (!toggle) {
             flushThread.flush();
           }
-          assertEquals("i=" + i, expectedCount, res.size());
+          assertEquals("toggle="+toggle+"i=" + i + " ts="+System.currentTimeMillis(),
+              expectedCount, res.size());
           toggle = !toggle;
         }
       }
 
-      flushThread.done();
-      flushThread.join();
-      flushThread.checkNoError();
     } finally {
+      try {
+        flushThread.done();
+        flushThread.join();
+        flushThread.checkNoError();
+      } catch (InterruptedException ie) {
+        LOG.warn("Caught exception when joining with flushThread", ie);
+      }
       HBaseTestingUtility.closeRegionAndWAL(this.region);
       this.region = null;
     }
@@ -3906,12 +3910,12 @@ public class TestHRegion {
 
     String method = "testWritesWhileScanning";
     this.region = initHRegion(tableName, method, CONF, families);
+    FlushThread flushThread = new FlushThread();
+    PutThread putThread = new PutThread(numRows, families, qualifiers);
     try {
-      PutThread putThread = new PutThread(numRows, families, qualifiers);
       putThread.start();
       putThread.waitForFirstPut();
 
-      FlushThread flushThread = new FlushThread();
       flushThread.start();
 
       Scan scan = new Scan(Bytes.toBytes("row0"), Bytes.toBytes("row1"));
@@ -3951,15 +3955,20 @@ public class TestHRegion {
 
       region.flush(true);
 
-      putThread.join();
-      putThread.checkNoError();
-
-      flushThread.done();
-      flushThread.join();
-      flushThread.checkNoError();
     } finally {
       try {
-        HBaseTestingUtility.closeRegionAndWAL(this.region);
+        flushThread.done();
+        flushThread.join();
+        flushThread.checkNoError();
+
+        putThread.join();
+        putThread.checkNoError();
+      } catch (InterruptedException ie) {
+        LOG.warn("Caught exception when joining with flushThread", ie);
+      }
+
+      try {
+          HBaseTestingUtility.closeRegionAndWAL(this.region);
       } catch (DroppedSnapshotException dse) {
         // We could get this on way out because we interrupt the background flusher and it could
         // fail anywhere causing a DSE over in the background flusher... only it is not properly
@@ -5109,7 +5118,7 @@ public class TestHRegion {
    *
    * @throws IOException
    */
-  private void assertScan(final HRegion r, final byte[] fs, final byte[] firstValue)
+  protected void assertScan(final HRegion r, final byte[] fs, final byte[] firstValue)
       throws IOException {
     byte[][] families = { fs };
     Scan scan = new Scan();
@@ -5172,7 +5181,7 @@ public class TestHRegion {
     }
   }
 
-  private Configuration initSplit() {
+  protected Configuration initSplit() {
     // Always compact if there is more than one store file.
     CONF.setInt("hbase.hstore.compactionThreshold", 2);
 
@@ -5886,6 +5895,64 @@ public class TestHRegion {
       assertEquals("19998", Bytes.toString(currRow.get(0).getRowArray(),
         currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
       assertEquals("19997", Bytes.toString(currRow.get(1).getRowArray(),
+        currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
+    } finally {
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
+      this.region = null;
+    }
+  }
+
+  @Test
+  public void testReverseScanShouldNotScanMemstoreIfReadPtLesser() throws Exception {
+    byte[] cf1 = Bytes.toBytes("CF1");
+    byte[][] families = { cf1 };
+    byte[] col = Bytes.toBytes("C");
+    String method = this.getName();
+    HBaseConfiguration conf = new HBaseConfiguration();
+    this.region = initHRegion(tableName, method, conf, families);
+    try {
+      // setup with one storefile and one memstore, to create scanner and get an earlier readPt
+      Put put = new Put(Bytes.toBytes("19996"));
+      put.addColumn(cf1, col, Bytes.toBytes("val"));
+      region.put(put);
+      Put put2 = new Put(Bytes.toBytes("19995"));
+      put2.addColumn(cf1, col, Bytes.toBytes("val"));
+      region.put(put2);
+      // create a reverse scan
+      Scan scan = new Scan(Bytes.toBytes("19996"));
+      scan.setReversed(true);
+      RegionScanner scanner = region.getScanner(scan);
+
+      // flush the cache. This will reset the store scanner
+      region.flushcache(true, true);
+
+      // create one memstore contains many rows will be skipped
+      // to check MemStoreScanner.seekToPreviousRow
+      for (int i = 10000; i < 20000; i++) {
+        Put p = new Put(Bytes.toBytes("" + i));
+        p.addColumn(cf1, col, Bytes.toBytes("" + i));
+        region.put(p);
+      }
+      List<Cell> currRow = new ArrayList<>();
+      boolean hasNext;
+      boolean assertDone = false;
+      do {
+        hasNext = scanner.next(currRow);
+        // With HBASE-15871, after the scanner is reset the memstore scanner should not be
+        // added here
+        if (!assertDone) {
+          StoreScanner current =
+              (StoreScanner) (((RegionScannerImpl) scanner).storeHeap).getCurrentForTesting();
+          List<KeyValueScanner> scanners = current.getAllScannersForTesting();
+          assertEquals("There should be only one scanner the store file scanner", 1,
+            scanners.size());
+          assertDone = true;
+        }
+      } while (hasNext);
+      assertEquals(2, currRow.size());
+      assertEquals("19996", Bytes.toString(currRow.get(0).getRowArray(),
+        currRow.get(0).getRowOffset(), currRow.get(0).getRowLength()));
+      assertEquals("19995", Bytes.toString(currRow.get(1).getRowArray(),
         currRow.get(1).getRowOffset(), currRow.get(1).getRowLength()));
     } finally {
       HBaseTestingUtility.closeRegionAndWAL(this.region);
@@ -6658,5 +6725,75 @@ public class TestHRegion {
       byte[]... families) throws IOException {
     return initHRegion(tableName, callingMethod, HBaseConfiguration.create(),
         families);
+  }
+
+  /**
+   * HBASE-16429 Make sure no stuck if roll writer when ring buffer is filled with appends
+   * @throws IOException if IO error occurred during test
+   */
+  @Test
+  public void testWritesWhileRollWriter() throws IOException {
+    int testCount = 10;
+    int numRows = 1024;
+    int numFamilies = 2;
+    int numQualifiers = 2;
+    final byte[][] families = new byte[numFamilies][];
+    for (int i = 0; i < numFamilies; i++) {
+      families[i] = Bytes.toBytes("family" + i);
+    }
+    final byte[][] qualifiers = new byte[numQualifiers][];
+    for (int i = 0; i < numQualifiers; i++) {
+      qualifiers[i] = Bytes.toBytes("qual" + i);
+    }
+
+    String method = "testWritesWhileRollWriter";
+    CONF.setInt("hbase.regionserver.wal.disruptor.event.count", 2);
+    this.region = initHRegion(tableName, method, CONF, families);
+    try {
+      List<Thread> threads = new ArrayList<Thread>();
+      for (int i = 0; i < numRows; i++) {
+        final int count = i;
+        Thread t = new Thread(new Runnable() {
+
+          @Override
+          public void run() {
+            byte[] row = Bytes.toBytes("row" + count);
+            Put put = new Put(row);
+            put.setDurability(Durability.SYNC_WAL);
+            byte[] value = Bytes.toBytes(String.valueOf(count));
+            for (byte[] family : families) {
+              for (byte[] qualifier : qualifiers) {
+                put.addColumn(family, qualifier, (long) count, value);
+              }
+            }
+            try {
+              region.put(put);
+            } catch (IOException e) {
+              throw new RuntimeException(e);
+            }
+          }
+        });
+        threads.add(t);
+      }
+      for (Thread t : threads) {
+        t.start();
+      }
+
+      for (int i = 0; i < testCount; i++) {
+        region.getWAL().rollWriter();
+        Thread.yield();
+      }
+    } finally {
+      try {
+        HBaseTestingUtility.closeRegionAndWAL(this.region);
+        CONF.setInt("hbase.regionserver.wal.disruptor.event.count", 16 * 1024);
+      } catch (DroppedSnapshotException dse) {
+        // We could get this on way out because we interrupt the background flusher and it could
+        // fail anywhere causing a DSE over in the background flusher... only it is not properly
+        // dealt with so could still be memory hanging out when we get to here -- memory we can't
+        // flush because the accounting is 'off' since original DSE.
+      }
+      this.region = null;
+    }
   }
 }

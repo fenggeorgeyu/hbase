@@ -24,10 +24,11 @@ import static com.google.common.base.Preconditions.checkPositionIndex;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Collection;
@@ -35,15 +36,13 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 
-import com.google.protobuf.ByteString;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.io.RawComparator;
 import org.apache.hadoop.io.WritableComparator;
 import org.apache.hadoop.io.WritableUtils;
@@ -52,6 +51,7 @@ import sun.misc.Unsafe;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
+import com.google.protobuf.ByteString;
 
 /**
  * Utility class that handles byte arrays, conversions to/from other types,
@@ -65,13 +65,10 @@ import com.google.common.collect.Lists;
     value="EQ_CHECK_FOR_OPERAND_NOT_COMPATIBLE_WITH_THIS",
     justification="It has been like this forever")
 public class Bytes implements Comparable<Bytes> {
-  //HConstants.UTF8_ENCODING should be updated if this changed
-  /** When we encode strings, we always specify UTF8 encoding */
-  private static final String UTF8_ENCODING = "UTF-8";
 
-  //HConstants.UTF8_CHARSET should be updated if this changed
-  /** When we encode strings, we always specify UTF8 encoding */
-  private static final Charset UTF8_CHARSET = Charset.forName(UTF8_ENCODING);
+  // Using the charset canonical name for String/byte[] conversions is much
+  // more efficient due to use of cached encoders/decoders.
+  private static final String UTF8_CSN = StandardCharsets.UTF_8.name();
 
   //HConstants.EMPTY_BYTE_ARRAY should be updated if this changed
   private static final byte [] EMPTY_BYTE_ARRAY = new byte [0];
@@ -188,7 +185,9 @@ public class Bytes implements Comparable<Bytes> {
   /**
    * Copy bytes from ByteString instance.
    * @param byteString copy from
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
    */
+  @Deprecated
   public Bytes(final ByteString byteString) {
     this(byteString.toByteArray());
   }
@@ -254,6 +253,10 @@ public class Bytes implements Comparable<Bytes> {
     return this.offset;
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   */
+  @Deprecated
   public ByteString toByteString() {
     return ByteString.copyFrom(this.bytes, this.offset, this.length);
   }
@@ -563,7 +566,7 @@ public class Bytes implements Comparable<Bytes> {
    * @param off offset into array
    * @return String made from <code>b</code> or null
    */
-  public static String toString(final byte [] b, int off) {
+  public static String toString(final byte[] b, int off) {
     if (b == null) {
       return null;
     }
@@ -571,7 +574,12 @@ public class Bytes implements Comparable<Bytes> {
     if (len <= 0) {
       return "";
     }
-    return new String(b, off, len, UTF8_CHARSET);
+    try {
+      return new String(b, off, len, UTF8_CSN);
+    } catch (UnsupportedEncodingException e) {
+      // should never happen!
+      throw new IllegalArgumentException("UTF8 encoding is not supported", e);
+    }
   }
 
   /**
@@ -583,14 +591,19 @@ public class Bytes implements Comparable<Bytes> {
    * @param len length of utf-8 sequence
    * @return String made from <code>b</code> or null
    */
-  public static String toString(final byte [] b, int off, int len) {
+  public static String toString(final byte[] b, int off, int len) {
     if (b == null) {
       return null;
     }
     if (len == 0) {
       return "";
     }
-    return new String(b, off, len, UTF8_CHARSET);
+    try {
+      return new String(b, off, len, UTF8_CSN);
+    } catch (UnsupportedEncodingException e) {
+      // should never happen!
+      throw new IllegalArgumentException("UTF8 encoding is not supported", e);
+    }
   }
 
   /**
@@ -715,7 +728,12 @@ public class Bytes implements Comparable<Bytes> {
    * @return the byte array
    */
   public static byte[] toBytes(String s) {
-    return s.getBytes(UTF8_CHARSET);
+    try {
+      return s.getBytes(UTF8_CSN);
+    } catch (UnsupportedEncodingException e) {
+      // should never happen!
+      throw new IllegalArgumentException("UTF8 decoding is not supported", e);
+    }
   }
 
   /**
@@ -2631,16 +2649,16 @@ public class Bytes implements Comparable<Bytes> {
       }
     }
     return result;
-    }
+  }
 
-    public static int findCommonPrefix(byte[] left, byte[] right, int leftLength, int rightLength,
-        int leftOffset, int rightOffset) {
-      int length = Math.min(leftLength, rightLength);
-      int result = 0;
+  public static int findCommonPrefix(byte[] left, byte[] right, int leftLength, int rightLength,
+      int leftOffset, int rightOffset) {
+    int length = Math.min(leftLength, rightLength);
+    int result = 0;
 
-      while (result < length && left[leftOffset + result] == right[rightOffset + result]) {
-        result++;
-      }
-      return result;
+    while (result < length && left[leftOffset + result] == right[rightOffset + result]) {
+      result++;
     }
+    return result;
+  }
 }

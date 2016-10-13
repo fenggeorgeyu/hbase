@@ -51,8 +51,6 @@ module Hbase
         # or neither are provided
         if endpoint_classname.nil? and cluster_key.nil?
           raise(ArgumentError, "Either ENDPOINT_CLASSNAME or CLUSTER_KEY must be specified.")
-        elsif !endpoint_classname.nil? and !cluster_key.nil?
-          raise(ArgumentError, "ENDPOINT_CLASSNAME and CLUSTER_KEY cannot both be specified.")
         end
 
         # Cluster Key is required for ReplicationPeerConfig for a custom replication endpoint
@@ -64,6 +62,7 @@ module Hbase
         config = args.fetch(CONFIG, nil)
         data = args.fetch(DATA, nil)
         table_cfs = args.fetch(TABLE_CFS, nil)
+        namespaces = args.fetch(NAMESPACES, nil)
 
         # Create and populate a ReplicationPeerConfig
         replication_peer_config = ReplicationPeerConfig.new
@@ -83,6 +82,14 @@ module Hbase
           data.each{|key, val|
             peer_data.put(Bytes.to_bytes(key), Bytes.to_bytes(val))
           }
+        end
+
+        unless namespaces.nil?
+          ns_set = java.util.HashSet.new
+          namespaces.each do |n|
+            ns_set.add(n)
+          end
+          replication_peer_config.set_namespaces(ns_set)
         end
 
         unless table_cfs.nil?
@@ -182,12 +189,76 @@ module Hbase
       end
       @replication_admin.removePeerTableCFs(id, map)
     end
+
+    # Set new namespaces config for the specified peer
+    def set_peer_namespaces(id, namespaces)
+      unless namespaces.nil?
+        ns_set = java.util.HashSet.new
+        namespaces.each do |n|
+          ns_set.add(n)
+        end
+        rpc = get_peer_config(id)
+        unless rpc.nil?
+          rpc.setNamespaces(ns_set)
+          @replication_admin.updatePeerConfig(id, rpc)
+        end
+      end
+    end
+
+    # Add some namespaces for the specified peer
+    def add_peer_namespaces(id, namespaces)
+      unless namespaces.nil?
+        rpc = get_peer_config(id)
+        unless rpc.nil?
+          ns_set = rpc.getNamespaces()
+          if ns_set.nil?
+            ns_set = java.util.HashSet.new
+          end
+          namespaces.each do |n|
+            ns_set.add(n)
+          end
+          rpc.setNamespaces(ns_set)
+          @replication_admin.updatePeerConfig(id, rpc)
+        end
+      end
+    end
+
+    # Remove some namespaces for the specified peer
+    def remove_peer_namespaces(id, namespaces)
+      unless namespaces.nil?
+        rpc = get_peer_config(id)
+        unless rpc.nil?
+          ns_set = rpc.getNamespaces()
+          unless ns_set.nil?
+            namespaces.each do |n|
+              ns_set.remove(n)
+            end
+          end
+          rpc.setNamespaces(ns_set)
+          @replication_admin.updatePeerConfig(id, rpc)
+        end
+      end
+    end
+
+    # Show the current namespaces config for the specified peer
+    def show_peer_namespaces(peer_config)
+      namespaces = peer_config.get_namespaces
+      if !namespaces.nil?
+        namespaces = java.util.ArrayList.new(namespaces)
+        java.util.Collections.sort(namespaces)
+        return namespaces.join(';')
+      else
+        return nil
+      end
+    end
+
     #----------------------------------------------------------------------------------------------
     # Enables a table's replication switch
     def enable_tablerep(table_name)
       tableName = TableName.valueOf(table_name)
       @replication_admin.enableTableRep(tableName)
     end
+
     #----------------------------------------------------------------------------------------------
     # Disables a table's replication switch
     def disable_tablerep(table_name)

@@ -92,8 +92,10 @@ public class ReplicationAdmin implements Closeable {
   // only Global for now, can add other type
   // such as, 1) no global replication, or 2) the table is replicated to this cluster, etc.
   public static final String REPLICATIONTYPE = "replicationType";
-  public static final String REPLICATIONGLOBAL = Integer
-      .toString(HConstants.REPLICATION_SCOPE_GLOBAL);
+  public static final String REPLICATIONGLOBAL =
+      Integer.toString(HConstants.REPLICATION_SCOPE_GLOBAL);
+  public static final String REPLICATIONSERIAL =
+      Integer.toString(HConstants.REPLICATION_SCOPE_SERIAL);
 
   private final Connection connection;
   // TODO: replication should be managed by master. All the classes except ReplicationAdmin should
@@ -187,6 +189,8 @@ public class ReplicationAdmin implements Closeable {
    * @param peerConfig configuration for the replication slave cluster
    */
   public void addPeer(String id, ReplicationPeerConfig peerConfig) throws ReplicationException {
+    checkNamespacesAndTableCfsConfigConflict(peerConfig.getNamespaces(),
+      peerConfig.getTableCFsMap());
     this.replicationPeers.registerPeer(id, peerConfig);
   }
 
@@ -200,8 +204,11 @@ public class ReplicationAdmin implements Closeable {
 
   public void updatePeerConfig(String id, ReplicationPeerConfig peerConfig)
       throws ReplicationException {
+    checkNamespacesAndTableCfsConfigConflict(peerConfig.getNamespaces(),
+      peerConfig.getTableCFsMap());
     this.replicationPeers.updatePeerConfig(id, peerConfig);
   }
+
   /**
    * Removes a peer cluster and stops the replication to it.
    * @param id a short name that identifies the cluster
@@ -287,13 +294,12 @@ public class ReplicationAdmin implements Closeable {
       Collection<String> appendCfs = entry.getValue();
       if (preTableCfs.containsKey(table)) {
         List<String> cfs = preTableCfs.get(table);
-        if (cfs == null || appendCfs == null) {
+        if (cfs == null || appendCfs == null || appendCfs.isEmpty()) {
           preTableCfs.put(table, null);
         } else {
           Set<String> cfSet = new HashSet<String>(cfs);
           cfSet.addAll(appendCfs);
           preTableCfs.put(table, Lists.newArrayList(cfSet));
-
         }
       } else {
         if (appendCfs == null || appendCfs.isEmpty()) {
@@ -340,9 +346,9 @@ public class ReplicationAdmin implements Closeable {
       Collection<String> removeCfs = entry.getValue();
       if (preTableCfs.containsKey(table)) {
         List<String> cfs = preTableCfs.get(table);
-        if (cfs == null && removeCfs == null) {
+        if (cfs == null && (removeCfs == null || removeCfs.isEmpty())) {
           preTableCfs.remove(table);
-        } else if (cfs != null && removeCfs != null) {
+        } else if (cfs != null && (removeCfs != null && !removeCfs.isEmpty())) {
           Set<String> cfSet = new HashSet<String>(cfs);
           cfSet.removeAll(removeCfs);
           if (cfSet.isEmpty()) {
@@ -350,16 +356,15 @@ public class ReplicationAdmin implements Closeable {
           } else {
             preTableCfs.put(table, Lists.newArrayList(cfSet));
           }
-        } else if (cfs == null && removeCfs != null) {
+        } else if (cfs == null && (removeCfs != null && !removeCfs.isEmpty())) {
           throw new ReplicationException("Cannot remove cf of table: " + table
               + " which doesn't specify cfs from table-cfs config in peer: " + id);
-        } else if (cfs != null && removeCfs == null) {
+        } else if (cfs != null && (removeCfs == null || removeCfs.isEmpty())) {
           throw new ReplicationException("Cannot remove table: " + table
               + " which has specified cfs from table-cfs config in peer: " + id);
         }
       } else {
         throw new ReplicationException("No table: " + table + " in table-cfs config of peer: " + id);
-
       }
     }
     setPeerTableCFs(id, preTableCfs);
@@ -375,6 +380,8 @@ public class ReplicationAdmin implements Closeable {
    */
   public void setPeerTableCFs(String id, Map<TableName, ? extends Collection<String>> tableCfs)
       throws ReplicationException {
+    checkNamespacesAndTableCfsConfigConflict(
+      this.replicationPeers.getReplicationPeerConfig(id).getNamespaces(), tableCfs);
     this.replicationPeers.setPeerTableCFsConfig(id, tableCfs);
   }
 
@@ -430,7 +437,10 @@ public class ReplicationAdmin implements Closeable {
           HashMap<String, String> replicationEntry = new HashMap<String, String>();
           replicationEntry.put(TNAME, tableName);
           replicationEntry.put(CFNAME, column.getNameAsString());
-          replicationEntry.put(REPLICATIONTYPE, REPLICATIONGLOBAL);
+          replicationEntry.put(REPLICATIONTYPE,
+              column.getScope() == HConstants.REPLICATION_SCOPE_GLOBAL ?
+                  REPLICATIONGLOBAL :
+                  REPLICATIONSERIAL);
           replicationColFams.add(replicationEntry);
         }
       }
@@ -616,10 +626,41 @@ public class ReplicationAdmin implements Closeable {
    */
   private boolean isTableRepEnabled(HTableDescriptor htd) {
     for (HColumnDescriptor hcd : htd.getFamilies()) {
-      if (hcd.getScope() != HConstants.REPLICATION_SCOPE_GLOBAL) {
+      if (hcd.getScope() != HConstants.REPLICATION_SCOPE_GLOBAL
+          && hcd.getScope() != HConstants.REPLICATION_SCOPE_SERIAL) {
         return false;
       }
     }
     return true;
+  }
+
+  /**
+   * Set a namespace in the peer config means that all tables in this namespace
+   * will be replicated to the peer cluster.
+   *
+   * 1. If you already have set a namespace in the peer config, then you can't set any table
+   *    of this namespace to the peer config.
+   * 2. If you already have set a table in the peer config, then you can't set this table's
+   *    namespace to the peer config.
+   *
+   * @param namespaces
+   * @param tableCfs
+   * @throws ReplicationException
+   */
+  private void checkNamespacesAndTableCfsConfigConflict(Set<String> namespaces,
+      Map<TableName, ? extends Collection<String>> tableCfs) throws ReplicationException {
+    if (namespaces == null || namespaces.isEmpty()) {
+      return;
+    }
+    if (tableCfs == null || tableCfs.isEmpty()) {
+      return;
+    }
+    for (Map.Entry<TableName, ? extends Collection<String>> entry : tableCfs.entrySet()) {
+      TableName table = entry.getKey();
+      if (namespaces.contains(table.getNamespaceAsString())) {
+        throw new ReplicationException(
+            "Table-cfs config conflict with namespaces config in peer");
+      }
+    }
   }
 }

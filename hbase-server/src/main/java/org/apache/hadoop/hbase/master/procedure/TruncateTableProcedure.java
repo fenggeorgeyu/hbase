@@ -18,54 +18,54 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import java.io.InputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
-import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.HBaseException;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.TruncateTableState;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.TruncateTableState;
 import org.apache.hadoop.hbase.util.ModifyRegionUtils;
-import org.apache.hadoop.security.UserGroupInformation;
 
 @InterfaceAudience.Private
 public class TruncateTableProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, TruncateTableState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineTableProcedure<TruncateTableState> {
   private static final Log LOG = LogFactory.getLog(TruncateTableProcedure.class);
 
   private boolean preserveSplits;
   private List<HRegionInfo> regions;
-  private UserGroupInformation user;
   private HTableDescriptor hTableDescriptor;
   private TableName tableName;
 
   public TruncateTableProcedure() {
     // Required by the Procedure framework to create the procedure on replay
+    super();
   }
 
   public TruncateTableProcedure(final MasterProcedureEnv env, final TableName tableName,
-      boolean preserveSplits) throws IOException {
+      boolean preserveSplits) {
+    this(env, tableName, preserveSplits, null);
+  }
+
+  public TruncateTableProcedure(final MasterProcedureEnv env, final TableName tableName,
+      boolean preserveSplits, ProcedurePrepareLatch latch) {
+    super(env, latch);
     this.tableName = tableName;
     this.preserveSplits = preserveSplits;
-    this.user = env.getRequestUser().getUGI();
-    this.setOwner(this.user.getShortUserName());
   }
 
   @Override
@@ -106,6 +106,8 @@ public class TruncateTableProcedure
           if (!preserveSplits) {
             // if we are not preserving splits, generate a new single region
             regions = Arrays.asList(ModifyRegionUtils.createHRegionInfos(hTableDescriptor, null));
+          } else {
+            regions = recreateRegionInfo(regions);
           }
           setNextState(TruncateTableState.TRUNCATE_TABLE_CREATE_FS_LAYOUT);
           break;
@@ -132,7 +134,11 @@ public class TruncateTableProcedure
           throw new UnsupportedOperationException("unhandled state=" + state);
       }
     } catch (HBaseException|IOException e) {
-      LOG.warn("Retriable error trying to truncate table=" + getTableName() + " state=" + state, e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-truncate-table", e);
+      } else {
+        LOG.warn("Retriable error trying to truncate table=" + getTableName() + " state=" + state, e);
+      }
     }
     return Flow.HAS_MORE_STATE;
   }
@@ -142,11 +148,27 @@ public class TruncateTableProcedure
     if (state == TruncateTableState.TRUNCATE_TABLE_PRE_OPERATION) {
       // nothing to rollback, pre-truncate is just table-state checks.
       // We can fail if the table does not exist or is not disabled.
+      // TODO: coprocessor rollback semantic is still undefined.
       return;
     }
 
     // The truncate doesn't have a rollback. The execution will succeed, at some point.
     throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected void completionCleanup(final MasterProcedureEnv env) {
+    releaseSyncLatch();
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final TruncateTableState state) {
+    switch (state) {
+      case TRUNCATE_TABLE_PRE_OPERATION:
+        return true;
+      default:
+        return false;
+    }
   }
 
   @Override
@@ -181,17 +203,6 @@ public class TruncateTableProcedure
   }
 
   @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, getTableName());
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, getTableName());
-  }
-
-  @Override
   public void toStringClassDetails(StringBuilder sb) {
     sb.append(getClass().getSimpleName());
     sb.append(" (table=");
@@ -207,7 +218,7 @@ public class TruncateTableProcedure
 
     MasterProcedureProtos.TruncateTableStateData.Builder state =
       MasterProcedureProtos.TruncateTableStateData.newBuilder()
-        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(this.user))
+        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
         .setPreserveSplits(preserveSplits);
     if (hTableDescriptor != null) {
       state.setTableSchema(ProtobufUtil.convertToTableSchema(hTableDescriptor));
@@ -228,7 +239,7 @@ public class TruncateTableProcedure
 
     MasterProcedureProtos.TruncateTableStateData state =
       MasterProcedureProtos.TruncateTableStateData.parseDelimitedFrom(stream);
-    user = MasterProcedureUtil.toUserInfo(state.getUserInfo());
+    setUser(MasterProcedureUtil.toUserInfo(state.getUserInfo()));
     if (state.hasTableSchema()) {
       hTableDescriptor = ProtobufUtil.convertToHTableDesc(state.getTableSchema());
       tableName = hTableDescriptor.getTableName();
@@ -246,6 +257,14 @@ public class TruncateTableProcedure
     }
   }
 
+  private static List<HRegionInfo> recreateRegionInfo(final List<HRegionInfo> regions) {
+    ArrayList<HRegionInfo> newRegions = new ArrayList<HRegionInfo>(regions.size());
+    for (HRegionInfo hri: regions) {
+      newRegions.add(new HRegionInfo(hri.getTable(), hri.getStartKey(), hri.getEndKey()));
+    }
+    return newRegions;
+  }
+
   private boolean prepareTruncate(final MasterProcedureEnv env) throws IOException {
     try {
       env.getMasterServices().checkTableModifiable(getTableName());
@@ -261,13 +280,7 @@ public class TruncateTableProcedure
     final MasterCoprocessorHost cpHost = env.getMasterCoprocessorHost();
     if (cpHost != null) {
       final TableName tableName = getTableName();
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          cpHost.preTruncateTableAction(tableName);
-          return null;
-        }
-      });
+      cpHost.preTruncateTableAction(tableName, getUser());
     }
     return true;
   }
@@ -277,13 +290,7 @@ public class TruncateTableProcedure
     final MasterCoprocessorHost cpHost = env.getMasterCoprocessorHost();
     if (cpHost != null) {
       final TableName tableName = getTableName();
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          cpHost.postCompletedTruncateTableAction(tableName);
-          return null;
-        }
-      });
+      cpHost.postCompletedTruncateTableAction(tableName, getUser());
     }
   }
 }

@@ -44,10 +44,12 @@ import org.apache.hadoop.hbase.coprocessor.CoprocessorService;
 import org.apache.hadoop.hbase.coprocessor.MasterCoprocessorEnvironment;
 import org.apache.hadoop.hbase.coprocessor.MasterObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.ipc.RpcServer;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
-import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.Quotas;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.Quotas;
+import org.apache.hadoop.hbase.security.User;
 
 /**
  * Provides the coprocessor framework and environment for master oriented
@@ -240,9 +242,10 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void preCreateTableAction(final HTableDescriptor htd, final HRegionInfo[] regions)
+  public void preCreateTableAction(final HTableDescriptor htd, final HRegionInfo[] regions,
+                                   final User user)
       throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -253,8 +256,8 @@ public class MasterCoprocessorHost
   }
 
   public void postCompletedCreateTableAction(
-      final HTableDescriptor htd, final HRegionInfo[] regions) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      final HTableDescriptor htd, final HRegionInfo[] regions, final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -284,8 +287,8 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void preDeleteTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void preDeleteTableAction(final TableName tableName, final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -295,8 +298,9 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void postCompletedDeleteTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void postCompletedDeleteTableAction(final TableName tableName, final User user)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -326,8 +330,8 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void preTruncateTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void preTruncateTableAction(final TableName tableName, final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -337,8 +341,9 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void postCompletedTruncateTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void postCompletedTruncateTableAction(final TableName tableName, final User user)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -370,9 +375,10 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void preModifyTableAction(final TableName tableName, final HTableDescriptor htd)
+  public void preModifyTableAction(final TableName tableName, final HTableDescriptor htd,
+                                   final User user)
       throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -382,9 +388,10 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void postCompletedModifyTableAction(final TableName tableName, final HTableDescriptor htd)
+  public void postCompletedModifyTableAction(final TableName tableName, final HTableDescriptor htd,
+                                             final User user)
       throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -420,9 +427,10 @@ public class MasterCoprocessorHost
 
   public boolean preAddColumnFamilyAction(
       final TableName tableName,
-      final HColumnDescriptor columnFamily)
+      final HColumnDescriptor columnFamily,
+      final User user)
       throws IOException {
-    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -434,9 +442,10 @@ public class MasterCoprocessorHost
 
   public void postCompletedAddColumnFamilyAction(
       final TableName tableName,
-      final HColumnDescriptor columnFamily)
+      final HColumnDescriptor columnFamily,
+      final User user)
       throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -472,8 +481,9 @@ public class MasterCoprocessorHost
 
   public boolean preModifyColumnFamilyAction(
       final TableName tableName,
-      final HColumnDescriptor columnFamily) throws IOException {
-    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      final HColumnDescriptor columnFamily,
+      final User user) throws IOException {
+    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -485,8 +495,9 @@ public class MasterCoprocessorHost
 
   public void postCompletedModifyColumnFamilyAction(
       final TableName tableName,
-      final HColumnDescriptor columnFamily) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      final HColumnDescriptor columnFamily,
+      final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -522,9 +533,10 @@ public class MasterCoprocessorHost
 
   public boolean preDeleteColumnFamilyAction(
       final TableName tableName,
-      final byte[] columnFamily)
+      final byte[] columnFamily,
+      final User user)
       throws IOException {
-    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -535,8 +547,8 @@ public class MasterCoprocessorHost
   }
 
   public void postCompletedDeleteColumnFamilyAction(
-      final TableName tableName, final byte[] columnFamily) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      final TableName tableName, final byte[] columnFamily, final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -566,8 +578,8 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void preEnableTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void preEnableTableAction(final TableName tableName, final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -577,8 +589,9 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void postCompletedEnableTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void postCompletedEnableTableAction(final TableName tableName, final User user)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -608,8 +621,8 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void preDisableTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void preDisableTableAction(final TableName tableName, final User user) throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -619,8 +632,9 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void postCompletedDisableTableAction(final TableName tableName) throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+  public void postCompletedDisableTableAction(final TableName tableName, final User user)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation(user) {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -842,7 +856,9 @@ public class MasterCoprocessorHost
   }
 
   public void preShutdown() throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    // While stopping the cluster all coprocessors method should be executed first then the
+    // coprocessor should be cleaned up.
+    execShutdown(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -857,7 +873,9 @@ public class MasterCoprocessorHost
   }
 
   public void preStopMaster() throws IOException {
-    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+    // While stopping master all coprocessors method should be executed first then the coprocessor
+    // environment should be cleaned up.
+    execShutdown(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
@@ -1168,6 +1186,11 @@ public class MasterCoprocessorHost
   private static abstract class CoprocessorOperation
       extends ObserverContext<MasterCoprocessorEnvironment> {
     public CoprocessorOperation() {
+      this(RpcServer.getRequestUser());
+    }
+
+    public CoprocessorOperation(User user) {
+      super(user);
     }
 
     public abstract void call(MasterObserver oserver,
@@ -1214,6 +1237,53 @@ public class MasterCoprocessorHost
           break;
         }
       }
+      ctx.postEnvCall(env);
+    }
+    return bypass;
+  }
+
+  /**
+   * Master coprocessor classes can be configured in any order, based on that priority is set and
+   * chained in a sorted order. For preStopMaster()/preShutdown(), coprocessor methods are invoked
+   * in call() and environment is shutdown in postEnvCall(). <br>
+   * Need to execute all coprocessor methods first then postEnvCall(), otherwise some coprocessors
+   * may remain shutdown if any exception occurs during next coprocessor execution which prevent
+   * Master stop or cluster shutdown. (Refer:
+   * <a href="https://issues.apache.org/jira/browse/HBASE-16663">HBASE-16663</a>
+   * @param ctx CoprocessorOperation
+   * @return true if bypaas coprocessor execution, false if not.
+   * @throws IOException
+   */
+  private boolean execShutdown(final CoprocessorOperation ctx) throws IOException {
+    if (ctx == null) return false;
+    boolean bypass = false;
+    List<MasterEnvironment> envs = coprocessors.get();
+    int envsSize = envs.size();
+    // Iterate the coprocessors and execute CoprocessorOperation's call()
+    for (int i = 0; i < envsSize; i++) {
+      MasterEnvironment env = envs.get(i);
+      if (env.getInstance() instanceof MasterObserver) {
+        ctx.prepare(env);
+        Thread currentThread = Thread.currentThread();
+        ClassLoader cl = currentThread.getContextClassLoader();
+        try {
+          currentThread.setContextClassLoader(env.getClassLoader());
+          ctx.call((MasterObserver) env.getInstance(), ctx);
+        } catch (Throwable e) {
+          handleCoprocessorThrowable(env, e);
+        } finally {
+          currentThread.setContextClassLoader(cl);
+        }
+        bypass |= ctx.shouldBypass();
+        if (ctx.shouldComplete()) {
+          break;
+        }
+      }
+    }
+
+    // Iterate the coprocessors and execute CoprocessorOperation's postEnvCall()
+    for (int i = 0; i < envsSize; i++) {
+      MasterEnvironment env = envs.get(i);
       ctx.postEnvCall(env);
     }
     return bypass;

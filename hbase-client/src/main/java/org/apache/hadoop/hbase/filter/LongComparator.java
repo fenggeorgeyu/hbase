@@ -20,14 +20,16 @@ package org.apache.hadoop.hbase.filter;
 
 import java.nio.ByteBuffer;
 
-import com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
 
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.generated.ComparatorProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ComparatorProtos;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
+
 
 /**
  * A long comparator which numerical compares against the specified byte array
@@ -35,24 +37,24 @@ import org.apache.hadoop.hbase.util.Bytes;
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public class LongComparator extends ByteArrayComparable {
-    private Long longValue;
+  private long longValue;
 
-    public LongComparator(long value) {
-      super(Bytes.toBytes(value));
-      this.longValue = value;
-    }
+  public LongComparator(long value) {
+    super(Bytes.toBytes(value));
+    this.longValue = value;
+  }
 
-    @Override
-    public int compareTo(byte[] value, int offset, int length) {
-      Long that = Bytes.toLong(value, offset, length);
-      return this.longValue.compareTo(that);
-    }
+  @Override
+  public int compareTo(byte[] value, int offset, int length) {
+    long that = Bytes.toLong(value, offset, length);
+    return Long.compare(longValue, that);
+  }
 
-    @Override
-    public int compareTo(ByteBuffer value, int offset, int length) {
-      Long that = ByteBufferUtils.toLong(value, offset);
-      return this.longValue.compareTo(that);
-    }
+  @Override
+  public int compareTo(ByteBuffer value, int offset, int length) {
+    long that = ByteBufferUtils.toLong(value, offset);
+    return Long.compare(longValue, that);
+  }
 
     /**
      * @return The comparator serialized using pb
@@ -61,7 +63,7 @@ public class LongComparator extends ByteArrayComparable {
     public byte [] toByteArray() {
         ComparatorProtos.LongComparator.Builder builder =
                 ComparatorProtos.LongComparator.newBuilder();
-        builder.setComparable(super.convert());
+        builder.setComparable(ProtobufUtil.toByteArrayComparable(this.value));
         return builder.build().toByteArray();
     }
 

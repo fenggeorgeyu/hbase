@@ -573,9 +573,12 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       return reader;
     }
 
-    protected int getCellBufSize() {
+    // From non encoded HFiles, we always read back KeyValue or its descendant.(Note: When HFile
+    // block is in DBB, it will be OffheapKV). So all parts of the Cell is in a contiguous
+    // array/buffer. How many bytes we should wrap to make the KV is what this method returns.
+    private int getKVBufSize() {
       int kvBufSize = KEY_VALUE_LEN_SIZE + currKeyLen + currValueLen;
-      if (this.reader.getFileContext().isIncludesTags()) {
+      if (currTagsLen > 0) {
         kvBufSize += Bytes.SIZEOF_SHORT + currTagsLen;
       }
       return kvBufSize;
@@ -586,7 +589,9 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
       this.returnBlocks(true);
     }
 
-    protected int getCurCellSize() {
+    // Returns the #bytes in HFile for the current cell. Used to skip these many bytes in current
+    // HFile block's buffer so as to position to the next cell.
+    private int getCurCellSerializedSize() {
       int curCellSize =  KEY_VALUE_LEN_SIZE + currKeyLen + currValueLen
           + currMemstoreTSLen;
       if (this.reader.getFileContext().isIncludesTags()) {
@@ -662,7 +667,8 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         long i = 0;
         offsetFromPos++;
         if (remaining >= Bytes.SIZEOF_INT) {
-          i = blockBuffer.getIntAfterPosition(offsetFromPos);
+          // The int read has to be converted to unsigned long so the & op
+          i = (blockBuffer.getIntAfterPosition(offsetFromPos) & 0x00000000ffffffffL);
           remaining -= Bytes.SIZEOF_INT;
           offsetFromPos += Bytes.SIZEOF_INT;
         }
@@ -708,8 +714,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         long ll = blockBuffer.getLongAfterPosition(offsetFromPos);
         klen = (int)(ll >> Integer.SIZE);
         vlen = (int)(Bytes.MASK_FOR_LOWER_INT_IN_LONG ^ ll);
-        if (klen < 0 || vlen < 0 || klen > blockBuffer.limit()
-            || vlen > blockBuffer.limit()) {
+        if (checkKeyLen(klen) || checkLen(vlen)) {
           throw new IllegalStateException("Invalid klen " + klen + " or vlen "
               + vlen + ". Block offset: "
               + curBlock.getOffset() + ", block length: " + blockBuffer.limit() + ", position: "
@@ -724,7 +729,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
           // Read short as unsigned, high byte first
           tlen = ((blockBuffer.getByteAfterPosition(offsetFromPos) & 0xff) << 8)
               ^ (blockBuffer.getByteAfterPosition(offsetFromPos + 1) & 0xff);
-          if (tlen < 0 || tlen > blockBuffer.limit()) {
+          if (checkLen(tlen)) {
             throw new IllegalStateException("Invalid tlen " + tlen + ". Block offset: "
                 + curBlock.getOffset() + ", block length: " + blockBuffer.limit() + ", position: "
                 + blockBuffer.position() + " (without header).");
@@ -934,7 +939,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
         return null;
 
       Cell ret;
-      int cellBufSize = getCellBufSize();
+      int cellBufSize = getKVBufSize();
       long seqId = 0l;
       if (this.reader.shouldIncludeMemstoreTS()) {
         seqId = currMemstoreTS;
@@ -1015,7 +1020,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
      */
     private void positionThisBlockBuffer() {
       try {
-        blockBuffer.skip(getCurCellSize());
+        blockBuffer.skip(getCurCellSerializedSize());
       } catch (IllegalArgumentException e) {
         LOG.error("Current pos = " + blockBuffer.position()
             + "; currKeyLen = " + currKeyLen + "; currValLen = "
@@ -1140,6 +1145,14 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
 
     /**
      * @param v
+     * @return True if v &lt;= 0 or v &gt; current block buffer limit.
+     */
+    protected final boolean checkKeyLen(final int v) {
+      return v <= 0 || v > this.blockBuffer.limit();
+    }
+
+    /**
+     * @param v
      * @return True if v &lt; 0 or v &gt; current block buffer limit.
      */
     protected final boolean checkLen(final int v) {
@@ -1150,7 +1163,7 @@ public class HFileReaderImpl implements HFile.Reader, Configurable {
      * Check key and value lengths are wholesome.
      */
     protected final void checkKeyValueLen() {
-      if (checkLen(this.currKeyLen) || checkLen(this.currValueLen)) {
+      if (checkKeyLen(this.currKeyLen) || checkLen(this.currValueLen)) {
         throw new IllegalStateException("Invalid currKeyLen " + this.currKeyLen
             + " or currValueLen " + this.currValueLen + ". Block offset: "
             + this.curBlock.getOffset() + ", block length: "

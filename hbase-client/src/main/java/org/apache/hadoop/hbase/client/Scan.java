@@ -38,9 +38,9 @@ import org.apache.hadoop.hbase.client.metrics.ScanMetrics;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
 import org.apache.hadoop.hbase.io.TimeRange;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.visibility.Authorizations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -137,7 +137,6 @@ public class Scan extends Query {
   private TimeRange tr = new TimeRange();
   private Map<byte [], NavigableSet<byte []>> familyMap =
     new TreeMap<byte [], NavigableSet<byte []>>(Bytes.BYTES_COMPARATOR);
-  private Boolean loadColumnFamiliesOnDemand = null;
   private Boolean asyncPrefetch = null;
 
   /**
@@ -273,6 +272,7 @@ public class Scan extends Query {
     this.asyncPrefetch = false;
     this.consistency = get.getConsistency();
     this.setIsolationLevel(get.getIsolationLevel());
+    this.loadColumnFamiliesOnDemand = get.getLoadColumnFamiliesOnDemandValue();
     for (Map.Entry<String, byte[]> attr : get.getAttributesMap().entrySet()) {
       setAttribute(attr.getKey(), attr.getValue());
     }
@@ -373,8 +373,16 @@ public class Scan extends Query {
    * next closest row after the specified row.
    * @param startRow row to start scanner at or after
    * @return this
+   * @throws IllegalArgumentException if startRow does not meet criteria
+   * for a row key (when length exceeds {@link HConstants#MAX_ROW_LENGTH})
    */
   public Scan setStartRow(byte [] startRow) {
+    if (Bytes.len(startRow) > HConstants.MAX_ROW_LENGTH) {
+      throw new IllegalArgumentException(
+        "startRow's length must be less than or equal to " +
+        HConstants.MAX_ROW_LENGTH + " to meet the criteria" +
+        " for a row key.");
+    }
     this.startRow = startRow;
     return this;
   }
@@ -389,8 +397,16 @@ public class Scan extends Query {
    * use {@link #setRowPrefixFilter(byte[])}.
    * The 'trailing 0' will not yield the desired result.</p>
    * @return this
+   * @throws IllegalArgumentException if stopRow does not meet criteria
+   * for a row key (when length exceeds {@link HConstants#MAX_ROW_LENGTH})
    */
   public Scan setStopRow(byte [] stopRow) {
+    if (Bytes.len(stopRow) > HConstants.MAX_ROW_LENGTH) {
+      throw new IllegalArgumentException(
+        "stopRow's length must be less than or equal to " +
+        HConstants.MAX_ROW_LENGTH + " to meet the criteria" +
+        " for a row key.");
+    }
     this.stopRow = stopRow;
     return this;
   }
@@ -479,7 +495,13 @@ public class Scan extends Query {
   }
 
   /**
-   * Set the maximum number of values to return for each call to next()
+   * Set the maximum number of values to return for each call to next().
+   * Callers should be aware that invoking this method with any value
+   * is equivalent to calling {@link #setAllowPartialResults(boolean)}
+   * with a value of {@code true}; partial results may be returned if
+   * this method is called. Use {@link #setMaxResultSize(long)}} to
+   * limit the size of a Scan's Results instead.
+   *
    * @param batch the maximum number of values
    */
   public Scan setBatch(int batch) {
@@ -731,40 +753,8 @@ public class Scan extends Query {
     return allowPartialResults;
   }
 
-  /**
-   * Set the value indicating whether loading CFs on demand should be allowed (cluster
-   * default is false). On-demand CF loading doesn't load column families until necessary, e.g.
-   * if you filter on one column, the other column family data will be loaded only for the rows
-   * that are included in result, not all rows like in normal case.
-   * With column-specific filters, like SingleColumnValueFilter w/filterIfMissing == true,
-   * this can deliver huge perf gains when there's a cf with lots of data; however, it can
-   * also lead to some inconsistent results, as follows:
-   * - if someone does a concurrent update to both column families in question you may get a row
-   *   that never existed, e.g. for { rowKey = 5, { cat_videos =&gt; 1 }, { video =&gt; "my cat" } }
-   *   someone puts rowKey 5 with { cat_videos =&gt; 0 }, { video =&gt; "my dog" }, concurrent scan
-   *   filtering on "cat_videos == 1" can get { rowKey = 5, { cat_videos =&gt; 1 },
-   *   { video =&gt; "my dog" } }.
-   * - if there's a concurrent split and you have more than 2 column families, some rows may be
-   *   missing some column families.
-   */
   public Scan setLoadColumnFamiliesOnDemand(boolean value) {
-    this.loadColumnFamiliesOnDemand = value;
-    return this;
-  }
-
-  /**
-   * Get the raw loadColumnFamiliesOnDemand setting; if it's not set, can be null.
-   */
-  public Boolean getLoadColumnFamiliesOnDemandValue() {
-    return this.loadColumnFamiliesOnDemand;
-  }
-
-  /**
-   * Get the logical value indicating whether on-demand CF loading should be allowed.
-   */
-  public boolean doLoadColumnFamiliesOnDemand() {
-    return (this.loadColumnFamiliesOnDemand != null)
-      && this.loadColumnFamiliesOnDemand.booleanValue();
+    return (Scan) super.setLoadColumnFamiliesOnDemand(value);
   }
 
   /**

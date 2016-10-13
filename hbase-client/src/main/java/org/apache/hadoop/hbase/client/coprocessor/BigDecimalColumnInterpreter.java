@@ -125,7 +125,7 @@ public class BigDecimalColumnInterpreter extends ColumnInterpreter<BigDecimal, B
     BigDecimalMsg.Builder builder = BigDecimalMsg.newBuilder();
     return builder.setBigdecimalMsg(ByteStringer.wrap(Bytes.toBytes(t))).build();
   }
-  
+
   @Override
   public BigDecimalMsg getProtoForCellType(BigDecimal t) {
     return getProtoForType(t);

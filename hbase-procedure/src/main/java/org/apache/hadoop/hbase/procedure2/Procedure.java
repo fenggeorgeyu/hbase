@@ -28,21 +28,19 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.ProcedureUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
 import org.apache.hadoop.hbase.procedure2.util.StringUtils;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureState;
-import org.apache.hadoop.hbase.util.ByteStringer;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureState;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.NonceKey;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.protobuf.ByteString;
 
 /**
  * Base Procedure class responsible to handle the Procedure Metadata
@@ -164,12 +162,37 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
   }
 
   /**
+   * Used to keep the procedure lock even when the procedure is yielding or suspended.
+   * @return true if the procedure should hold on the lock until completionCleanup()
+   */
+  protected boolean holdLock(final TEnvironment env) {
+    return false;
+  }
+
+  /**
+   * This is used in conjuction with holdLock(). If holdLock() is true
+   * the procedure executor will not call acquireLock() if hasLock() is true.
+   * @return true if the procedure has the lock, false otherwise.
+   */
+  protected boolean hasLock(final TEnvironment env) {
+    return false;
+  }
+
+  /**
    * Called when the procedure is loaded for replay.
    * The procedure implementor may use this method to perform some quick
    * operation before replay.
    * e.g. failing the procedure if the state on replay may be unknown.
    */
   protected void beforeReplay(final TEnvironment env) {
+    // no-op
+  }
+
+  /**
+   * Called when the procedure is ready to be added to the queue after
+   * the loading/replay operation.
+   */
+  protected void afterReplay(final TEnvironment env) {
     // no-op
   }
 
@@ -333,6 +356,17 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
   }
 
   /**
+   * @return true if the procedure is in a RUNNABLE state.
+   */
+  protected synchronized boolean isRunnable() {
+    return state == ProcedureState.RUNNABLE;
+  }
+
+  public synchronized boolean isInitializing() {
+    return state == ProcedureState.INITIALIZING;
+  }
+
+  /**
    * @return true if the procedure has failed.
    *         true may mean failed but not yet rolledback or failed and rolledback.
    */
@@ -472,8 +506,12 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
     setFailure(source, new ProcedureAbortedException(msg));
   }
 
-  @InterfaceAudience.Private
-  protected synchronized boolean setTimeoutFailure() {
+  /**
+   * Called by the ProcedureExecutor when the timeout set by setTimeout() is expired.
+   * @return true to let the framework handle the timeout as abort,
+   *         false in case the procedure handled the timeout itself.
+   */
+  protected synchronized boolean setTimeoutFailure(final TEnvironment env) {
     if (state == ProcedureState.WAITING_TIMEOUT) {
       long timeDiff = EnvironmentEdgeManager.currentTime() - lastUpdate;
       setFailure("ProcedureExecutor", new TimeoutIOException(
@@ -542,6 +580,24 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
   }
 
   /**
+   * Internal method called by the ProcedureExecutor that starts the
+   * user-level code acquireLock().
+   */
+  @InterfaceAudience.Private
+  protected boolean doAcquireLock(final TEnvironment env) {
+    return acquireLock(env);
+  }
+
+  /**
+   * Internal method called by the ProcedureExecutor that starts the
+   * user-level code releaseLock().
+   */
+  @InterfaceAudience.Private
+  protected void doReleaseLock(final TEnvironment env) {
+    releaseLock(env);
+  }
+
+  /**
    * Called on store load to initialize the Procedure internals after
    * the creation/deserialization.
    */
@@ -592,6 +648,10 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
   @InterfaceAudience.Private
   protected synchronized boolean hasChildren() {
     return childrenLatch > 0;
+  }
+
+  protected synchronized int getChildrenLatch() {
+    return childrenLatch;
   }
 
   /**
@@ -712,22 +772,6 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
   }
 
   /**
-   * Helper to create the ProcedureInfo from Procedure.
-   */
-  @InterfaceAudience.Private
-  public static ProcedureInfo createProcedureInfo(final Procedure proc, final NonceKey nonceKey) {
-    RemoteProcedureException exception = proc.hasException() ? proc.getException() : null;
-    return new ProcedureInfo(proc.getProcId(), proc.toStringClass(), proc.getOwner(),
-        ProcedureUtil.convertToProcedureState(proc.getState()),
-        proc.hasParent() ? proc.getParentProcId() : -1, nonceKey,
-        exception != null
-            ? new ProcedureUtil.ForeignExceptionMsg(
-                RemoteProcedureException.toProto(exception.getSource(), exception.getCause()))
-            : null,
-        proc.getLastUpdate(), proc.getStartTime(), proc.getResult());
-  }
-
-  /**
    * Helper to convert the procedure to protobuf.
    * Used by ProcedureStore implementations.
    */
@@ -771,7 +815,7 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
 
     byte[] result = proc.getResult();
     if (result != null) {
-      builder.setResult(ByteStringer.wrap(result));
+      builder.setResult(UnsafeByteOperations.unsafeWrap(result));
     }
 
     ByteString.Output stateStream = ByteString.newOutput();
@@ -845,5 +889,17 @@ public abstract class Procedure<TEnvironment> implements Comparable<Procedure> {
     proc.deserializeStateData(proto.getStateData().newInput());
 
     return proc;
+  }
+
+  /**
+   * @param a the first procedure to be compared.
+   * @param b the second procedure to be compared.
+   * @return true if the two procedures have the same parent
+   */
+  public static boolean haveSameParent(final Procedure a, final Procedure b) {
+    if (a.hasParent() && b.hasParent()) {
+      return a.getParentProcId() == b.getParentProcId();
+    }
+    return false;
   }
 }

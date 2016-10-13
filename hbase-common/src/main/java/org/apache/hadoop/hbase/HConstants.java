@@ -229,9 +229,6 @@ public final class HConstants {
   /** Default value for ZooKeeper session timeout */
   public static final int DEFAULT_ZK_SESSION_TIMEOUT = 180 * 1000;
 
-  /** Configuration key for whether to use ZK.multi */
-  public static final String ZOOKEEPER_USEMULTI = "hbase.zookeeper.useMulti";
-
   /** Parameter name for port region server listens on. */
   public static final String REGIONSERVER_PORT = "hbase.regionserver.port";
 
@@ -304,6 +301,9 @@ public final class HConstants {
 
   /** Like the previous, but for old logs that are about to be deleted */
   public static final String HREGION_OLDLOGDIR_NAME = "oldWALs";
+
+  /** Staging dir used by bulk load */
+  public static final String BULKLOAD_STAGING_DIR_NAME = "staging";
 
   public static final String CORRUPT_DIR_NAME = "corrupt";
 
@@ -428,6 +428,20 @@ public final class HConstants {
 
   /** The catalog family */
   public static final byte [] CATALOG_FAMILY = Bytes.toBytes(CATALOG_FAMILY_STR);
+
+  /** The replication barrier family as a string*/
+  public static final String REPLICATION_BARRIER_FAMILY_STR = "rep_barrier";
+
+  /** The replication barrier family */
+  public static final byte [] REPLICATION_BARRIER_FAMILY =
+      Bytes.toBytes(REPLICATION_BARRIER_FAMILY_STR);
+
+  /** The replication barrier family as a string*/
+  public static final String REPLICATION_POSITION_FAMILY_STR = "rep_position";
+
+  /** The replication barrier family */
+  public static final byte [] REPLICATION_POSITION_FAMILY =
+      Bytes.toBytes(REPLICATION_POSITION_FAMILY_STR);
 
   /** The RegionInfo qualifier as a string */
   public static final String REGIONINFO_QUALIFIER_STR = "regioninfo";
@@ -636,6 +650,12 @@ public final class HConstants {
   public static final int REPLICATION_SCOPE_GLOBAL = 1;
 
   /**
+   * Scope tag for serially scoped data
+   * This data will be replicated to all peers by the order of sequence id.
+   */
+  public static final int REPLICATION_SCOPE_SERIAL = 2;
+
+  /**
    * Default cluster ID, cannot be used to identify a cluster so a key with
    * this value means it wasn't meant for replication.
    */
@@ -716,6 +736,18 @@ public final class HConstants {
    * Default value of {@link #HBASE_CLIENT_MAX_PERREGION_TASKS}.
    */
   public static final int DEFAULT_HBASE_CLIENT_MAX_PERREGION_TASKS = 1;
+
+  /**
+   * The maximum number of concurrent pending RPC requests for one server in process level.
+   */
+  public static final String HBASE_CLIENT_PERSERVER_REQUESTS_THRESHOLD =
+      "hbase.client.perserver.requests.threshold";
+
+  /**
+   * Default value of {@link #HBASE_CLIENT_PERSERVER_REQUESTS_THRESHOLD}.
+   */
+  public static final int DEFAULT_HBASE_CLIENT_PERSERVER_REQUESTS_THRESHOLD = Integer.MAX_VALUE;
+
 
   /**
    * Parameter name for server pause value, used mostly as value to wait before
@@ -815,8 +847,21 @@ public final class HConstants {
 
   /**
    * timeout for each RPC
+   * @deprecated Use {@link #HBASE_RPC_READ_TIMEOUT_KEY} or {@link #HBASE_RPC_WRITE_TIMEOUT_KEY}
+   * instead.
    */
+  @Deprecated
   public static final String HBASE_RPC_TIMEOUT_KEY = "hbase.rpc.timeout";
+
+  /**
+   * timeout for each read RPC
+   */
+  public static final String HBASE_RPC_READ_TIMEOUT_KEY = "hbase.rpc.read.timeout";
+
+  /**
+   * timeout for each write RPC
+   */
+  public static final String HBASE_RPC_WRITE_TIMEOUT_KEY = "hbase.rpc.write.timeout";
 
   /**
    * Default value of {@link #HBASE_RPC_TIMEOUT_KEY}
@@ -853,6 +898,12 @@ public final class HConstants {
   public static final boolean REPLICATION_BULKLOAD_ENABLE_DEFAULT = false;
   /** Replication cluster id of source cluster which uniquely identifies itself with peer cluster */
   public static final String REPLICATION_CLUSTER_ID = "hbase.replication.cluster.id";
+
+  public static final String
+      REPLICATION_SERIALLY_WAITING_KEY = "hbase.serial.replication.waitingMs";
+  public static final long
+      REPLICATION_SERIALLY_WAITING_DEFAULT = 10000;
+
   /**
    * Directory where the source cluster file system client configuration are placed which is used by
    * sink cluster to copy HFiles from source cluster file system

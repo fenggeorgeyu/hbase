@@ -17,13 +17,12 @@
  */
 package org.apache.hadoop.hbase;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,8 +33,6 @@ import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.ServiceException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -49,6 +46,7 @@ import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
+import org.apache.hadoop.hbase.client.RegionServerCallable;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
@@ -58,12 +56,21 @@ import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier;
+import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.RegionSpecifierType;
 import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos;
+import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos.MutateRowsRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos.MutateRowsResponse;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.ExceptionUtil;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.PairOfSameType;
+
+import com.google.common.annotations.VisibleForTesting;
+
+import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.Nullable;
 
 /**
  * Read/write operations on region and assignment information store in
@@ -113,13 +120,30 @@ public class MetaTableAccessor {
    *                             region is the result of a merge
    * info:mergeB              => contains a serialized HRI for the second parent region if the
    *                             region is the result of a merge
-   *
    * The actual layout of meta should be encapsulated inside MetaTableAccessor methods,
    * and should not leak out of it (through Result objects, etc)
+   *
+   * For replication serially, there are two column families "rep_barrier", "rep_position" whose
+   * row key is encodedRegionName.
+   * rep_barrier:{seqid}      => in each time a RS opens a region, it saves the open sequence
+   *                                  id in this region
+   * rep_position:{peerid}    => to save the max sequence id we have pushed for each peer
+   * rep_position:_TABLENAME_ => a special cell to save this region's table name, will used when
+   *                             we clean old data
+   * rep_position:_DAUGHTER_  => a special cell to present this region is split or merged, in this
+   *                             cell the value is merged encoded name or two split encoded names
+   *                             separated by ","
    */
 
   private static final Log LOG = LogFactory.getLog(MetaTableAccessor.class);
   private static final Log METALOG = LogFactory.getLog("org.apache.hadoop.hbase.META");
+
+  // Save its daughter region(s) when split/merge
+  private static final byte[] daughterNamePosCq = Bytes.toBytes("_DAUGHTER_");
+
+  // Save its table name because we only know region's encoded name
+  private static final String tableNamePeer = "_TABLENAME_";
+  private static final byte[] tableNamePosCq = Bytes.toBytes(tableNamePeer);
 
   static final byte [] META_REGION_PREFIX;
   static {
@@ -441,12 +465,9 @@ public class MetaTableAccessor {
    */
   public static List<HRegionInfo> getTableRegions(Connection connection,
       TableName tableName, final boolean excludeOfflinedSplitParents)
-      throws IOException {
-    List<Pair<HRegionInfo, ServerName>> result;
-
-    result = getTableRegionsAndLocations(connection, tableName,
-      excludeOfflinedSplitParents);
-
+  throws IOException {
+    List<Pair<HRegionInfo, ServerName>> result =
+        getTableRegionsAndLocations(connection, tableName, excludeOfflinedSplitParents);
     return getListOfHRegionInfos(result);
   }
 
@@ -795,10 +816,10 @@ public class MetaTableAccessor {
    * @return Get closest metatable region row to passed <code>row</code>
    * @throws java.io.IOException
    */
-  @Nonnull
+  @NonNull
   public static HRegionInfo getClosestRegionInfo(Connection connection,
-      @Nonnull final TableName tableName,
-      @Nonnull final byte[] row)
+      @NonNull final TableName tableName,
+      @NonNull final byte[] row)
       throws IOException {
     byte[] searchRow = HRegionInfo.createRegionName(tableName, row, HConstants.NINES, false);
     Scan scan = getMetaScan(connection, 1);
@@ -1318,6 +1339,19 @@ public class MetaTableAccessor {
     return delete;
   }
 
+  public static Put makeBarrierPut(byte[] encodedRegionName, long seq, byte[] tableName) {
+    byte[] seqBytes = Bytes.toBytes(seq);
+    return new Put(encodedRegionName)
+        .addImmutable(HConstants.REPLICATION_BARRIER_FAMILY, seqBytes, seqBytes)
+        .addImmutable(HConstants.REPLICATION_POSITION_FAMILY, tableNamePosCq, tableName);
+  }
+
+
+  public static Put makeSerialDaughterPut(byte[] encodedRegionName, byte[] value) {
+    return new Put(encodedRegionName).addImmutable(HConstants.REPLICATION_POSITION_FAMILY,
+        daughterNamePosCq, value);
+  }
+
   /**
    * Adds split daughters to the Put
    */
@@ -1334,27 +1368,28 @@ public class MetaTableAccessor {
   }
 
   /**
-   * Put the passed <code>p</code> to the <code>hbase:meta</code> table.
+   * Put the passed <code>puts</code> to the <code>hbase:meta</code> table.
+   * Non-atomic for multi puts.
    * @param connection connection we're using
-   * @param p Put to add to hbase:meta
+   * @param puts Put to add to hbase:meta
    * @throws IOException
    */
-  static void putToMetaTable(final Connection connection, final Put p)
+  static void putToMetaTable(final Connection connection, final Put... puts)
     throws IOException {
-    put(getMetaHTable(connection), p);
+    put(getMetaHTable(connection), Arrays.asList(puts));
   }
 
   /**
    * @param t Table to use (will be closed when done).
-   * @param p put to make
+   * @param puts puts to make
    * @throws IOException
    */
-  private static void put(final Table t, final Put p) throws IOException {
+  private static void put(final Table t, final List<Put> puts) throws IOException {
     try {
       if (METALOG.isDebugEnabled()) {
-        METALOG.debug(mutationToString(p));
+        METALOG.debug(mutationsToString(puts));
       }
-      t.put(p);
+      t.put(puts);
     } finally {
       t.close();
     }
@@ -1490,7 +1525,7 @@ public class MetaTableAccessor {
    * Adds a (single) hbase:meta row for the specified new region and its daughters. Note that this
    * does not add its daughter's as different rows, but adds information about the daughters
    * in the same row as the parent. Use
-   * {@link #splitRegion(Connection, HRegionInfo, HRegionInfo, HRegionInfo, ServerName, int)}
+   * {@link #splitRegion(Connection, HRegionInfo, HRegionInfo, HRegionInfo, ServerName,int,boolean)}
    * if you want to do that.
    * @param meta the Table for META
    * @param regionInfo region information
@@ -1515,7 +1550,7 @@ public class MetaTableAccessor {
    * Adds a (single) hbase:meta row for the specified new region and its daughters. Note that this
    * does not add its daughter's as different rows, but adds information about the daughters
    * in the same row as the parent. Use
-   * {@link #splitRegion(Connection, HRegionInfo, HRegionInfo, HRegionInfo, ServerName, int)}
+   * {@link #splitRegion(Connection, HRegionInfo, HRegionInfo, HRegionInfo, ServerName,int,boolean)}
    * if you want to do that.
    * @param connection connection we're using
    * @param regionInfo region information
@@ -1601,11 +1636,12 @@ public class MetaTableAccessor {
    * @param regionB
    * @param sn the location of the region
    * @param masterSystemTime
+   * @param saveBarrier true if need save replication barrier in meta, used for serial replication
    * @throws IOException
    */
   public static void mergeRegions(final Connection connection, HRegionInfo mergedRegion,
       HRegionInfo regionA, HRegionInfo regionB, ServerName sn, int regionReplication,
-      long masterSystemTime)
+      long masterSystemTime, boolean saveBarrier)
           throws IOException {
     Table meta = getMetaHTable(connection);
     try {
@@ -1636,7 +1672,17 @@ public class MetaTableAccessor {
 
       byte[] tableRow = Bytes.toBytes(mergedRegion.getRegionNameAsString()
         + HConstants.DELIMITER);
-      multiMutate(meta, tableRow, putOfMerged, deleteA, deleteB);
+      Mutation[] mutations;
+      if (saveBarrier) {
+        Put putBarrierA = makeSerialDaughterPut(regionA.getEncodedNameAsBytes(),
+            Bytes.toBytes(mergedRegion.getEncodedName()));
+        Put putBarrierB = makeSerialDaughterPut(regionB.getEncodedNameAsBytes(),
+            Bytes.toBytes(mergedRegion.getEncodedName()));
+        mutations = new Mutation[] { putOfMerged, deleteA, deleteB, putBarrierA, putBarrierB };
+      } else {
+        mutations = new Mutation[] { putOfMerged, deleteA, deleteB };
+      }
+      multiMutate(connection, meta, tableRow, mutations);
     } finally {
       meta.close();
     }
@@ -1652,10 +1698,11 @@ public class MetaTableAccessor {
    * @param splitA Split daughter region A
    * @param splitB Split daughter region A
    * @param sn the location of the region
+   * @param saveBarrier true if need save replication barrier in meta, used for serial replication
    */
-  public static void splitRegion(final Connection connection,
-                                 HRegionInfo parent, HRegionInfo splitA, HRegionInfo splitB,
-                                 ServerName sn, int regionReplication) throws IOException {
+  public static void splitRegion(final Connection connection, HRegionInfo parent,
+      HRegionInfo splitA, HRegionInfo splitB, ServerName sn, int regionReplication,
+      boolean saveBarrier) throws IOException {
     Table meta = getMetaHTable(connection);
     try {
       HRegionInfo copyOfParent = new HRegionInfo(parent);
@@ -1680,8 +1727,17 @@ public class MetaTableAccessor {
         addEmptyLocation(putB, i);
       }
 
+      Mutation[] mutations;
+      if (saveBarrier) {
+        Put putBarrier = makeSerialDaughterPut(parent.getEncodedNameAsBytes(),
+            Bytes
+                .toBytes(splitA.getEncodedName() + HConstants.DELIMITER + splitB.getEncodedName()));
+        mutations = new Mutation[]{putParent, putA, putB, putBarrier};
+      } else {
+        mutations = new Mutation[]{putParent, putA, putB};
+      }
       byte[] tableRow = Bytes.toBytes(parent.getRegionNameAsString() + HConstants.DELIMITER);
-      multiMutate(meta, tableRow, putParent, putA, putB);
+      multiMutate(connection, meta, tableRow, mutations);
     } finally {
       meta.close();
     }
@@ -1726,37 +1782,74 @@ public class MetaTableAccessor {
     LOG.info("Deleted table " + table + " state from META");
   }
 
+  private static void multiMutate(Connection connection, Table table, byte[] row,
+      Mutation... mutations)
+  throws IOException {
+    multiMutate(connection, table, row, Arrays.asList(mutations));
+  }
+
   /**
-   * Performs an atomic multi-Mutate operation against the given table.
+   * Performs an atomic multi-mutate operation against the given table.
    */
-  private static void multiMutate(Table table, byte[] row, Mutation... mutations)
-      throws IOException {
-    CoprocessorRpcChannel channel = table.coprocessorService(row);
-    MultiRowMutationProtos.MutateRowsRequest.Builder mmrBuilder
-      = MultiRowMutationProtos.MutateRowsRequest.newBuilder();
+  // Used by the RSGroup Coprocessor Endpoint. It had a copy/paste of the below. Need to reveal
+  // this facility for CPEP use or at least those CPEPs that are on their way to becoming part of
+  // core as is the intent for RSGroup eventually.
+  public static void multiMutate(Connection connection, final Table table, byte[] row,
+      final List<Mutation> mutations)
+  throws IOException {
     if (METALOG.isDebugEnabled()) {
       METALOG.debug(mutationsToString(mutations));
     }
-    for (Mutation mutation : mutations) {
-      if (mutation instanceof Put) {
-        mmrBuilder.addMutationRequest(ProtobufUtil.toMutation(
-          ClientProtos.MutationProto.MutationType.PUT, mutation));
-      } else if (mutation instanceof Delete) {
-        mmrBuilder.addMutationRequest(ProtobufUtil.toMutation(
-          ClientProtos.MutationProto.MutationType.DELETE, mutation));
-      } else {
-        throw new DoNotRetryIOException("multi in MetaEditor doesn't support "
-          + mutation.getClass().getName());
+    // TODO: Need rollback!!!!
+    // TODO: Need Retry!!!
+    // TODO: What for a timeout? Default write timeout? GET FROM HTABLE?
+    // TODO: Review when we come through with ProcedureV2.
+    RegionServerCallable<MutateRowsResponse,
+        MultiRowMutationProtos.MultiRowMutationService.BlockingInterface> callable =
+        new RegionServerCallable<MutateRowsResponse,
+          MultiRowMutationProtos.MultiRowMutationService.BlockingInterface>(
+              connection, table.getName(), row, null/*RpcController not used in this CPEP!*/) {
+      @Override
+      protected MutateRowsResponse rpcCall() throws Exception {
+        final MutateRowsRequest.Builder builder = MutateRowsRequest.newBuilder();
+        for (Mutation mutation : mutations) {
+          if (mutation instanceof Put) {
+            builder.addMutationRequest(ProtobufUtil.toMutation(
+              ClientProtos.MutationProto.MutationType.PUT, mutation));
+          } else if (mutation instanceof Delete) {
+            builder.addMutationRequest(ProtobufUtil.toMutation(
+              ClientProtos.MutationProto.MutationType.DELETE, mutation));
+          } else {
+            throw new DoNotRetryIOException("multi in MetaEditor doesn't support "
+              + mutation.getClass().getName());
+          }
+        }
+        // The call to #prepare that ran before this invocation will have populated HRegionLocation.
+        HRegionLocation hrl = getLocation();
+        RegionSpecifier region = ProtobufUtil.buildRegionSpecifier(
+            RegionSpecifierType.REGION_NAME, hrl.getRegionInfo().getRegionName());
+        builder.setRegion(region);
+        // The rpcController here is awkward. The Coprocessor Endpoint wants an instance of a
+        // com.google.protobuf but we are going over an rpc that is all shaded protobuf so it
+        // wants a org.apache.h.h.shaded.com.google.protobuf.RpcController. Set up a factory
+        // that makes com.google.protobuf.RpcController and then copy into it configs.
+        return getStub().mutateRows(null, builder.build());
       }
-    }
 
-    MultiRowMutationProtos.MultiRowMutationService.BlockingInterface service =
-      MultiRowMutationProtos.MultiRowMutationService.newBlockingStub(channel);
-    try {
-      service.mutateRows(null, mmrBuilder.build());
-    } catch (ServiceException ex) {
-      ProtobufUtil.toIOException(ex);
-    }
+      @Override
+      // Called on the end of the super.prepare call. Set the stub.
+      protected void setStubByServiceName(ServerName serviceName/*Ignored*/) throws IOException {
+        CoprocessorRpcChannel channel = table.coprocessorService(getRow());
+        setStub(MultiRowMutationProtos.MultiRowMutationService.newBlockingStub(channel));
+      }
+    };
+    int writeTimeout = connection.getConfiguration().getInt(HConstants.HBASE_RPC_WRITE_TIMEOUT_KEY,
+        connection.getConfiguration().getInt(HConstants.HBASE_RPC_TIMEOUT_KEY,
+            HConstants.DEFAULT_HBASE_RPC_TIMEOUT));
+    // The region location should be cached in connection. Call prepare so this callable picks
+    // up the region location (see super.prepare method).
+    callable.prepare(false);
+    callable.call(writeTimeout);
   }
 
   /**
@@ -1779,6 +1872,27 @@ public class MetaTableAccessor {
     throws IOException {
     updateLocation(connection, regionInfo, sn, openSeqNum, masterSystemTime);
   }
+
+  /**
+   * Updates the progress of pushing entries to peer cluster. Skip entry if value is -1.
+   * @param connection connection we're using
+   * @param peerId the peerId to push
+   * @param positions map that saving positions for each region
+   * @throws IOException
+   */
+  public static void updateReplicationPositions(Connection connection, String peerId,
+      Map<String, Long> positions) throws IOException {
+    List<Put> puts = new ArrayList<>();
+    for (Map.Entry<String, Long> entry : positions.entrySet()) {
+      long value = Math.abs(entry.getValue());
+      Put put = new Put(Bytes.toBytes(entry.getKey()));
+      put.addImmutable(HConstants.REPLICATION_POSITION_FAMILY, Bytes.toBytes(peerId),
+          Bytes.toBytes(value));
+      puts.add(put);
+    }
+    getMetaHTable(connection).put(puts);
+  }
+
 
   /**
    * Updates the location of the specified region to be the specified server.
@@ -1954,16 +2068,6 @@ public class MetaTableAccessor {
     return p;
   }
 
-  private static String mutationsToString(Mutation ... mutations) throws IOException {
-    StringBuilder sb = new StringBuilder();
-    String prefix = "";
-    for (Mutation mutation : mutations) {
-      sb.append(prefix).append(mutationToString(mutation));
-      prefix = ", ";
-    }
-    return sb.toString();
-  }
-
   private static String mutationsToString(List<? extends Mutation> mutations) throws IOException {
     StringBuilder sb = new StringBuilder();
     String prefix = "";
@@ -1976,5 +2080,125 @@ public class MetaTableAccessor {
 
   private static String mutationToString(Mutation p) throws IOException {
     return p.getClass().getSimpleName() + p.toJSON();
+  }
+
+  /**
+   * Get replication position for a peer in a region.
+   * @param connection connection we're using
+   * @return the position of this peer, -1 if no position in meta.
+   */
+  public static long getReplicationPositionForOnePeer(Connection connection,
+      byte[] encodedRegionName, String peerId) throws IOException {
+    Get get = new Get(encodedRegionName);
+    get.addColumn(HConstants.REPLICATION_POSITION_FAMILY, Bytes.toBytes(peerId));
+    Result r = get(getMetaHTable(connection), get);
+    if (r.isEmpty()) {
+      return -1;
+    }
+    Cell cell = r.rawCells()[0];
+    return Bytes.toLong(cell.getValueArray(),cell.getValueOffset(),cell.getValueLength());
+  }
+
+  /**
+   * Get replication positions for all peers in a region.
+   * @param connection connection we're using
+   * @param encodedRegionName region's encoded name
+   * @return the map of positions for each peer
+   */
+  public static Map<String, Long> getReplicationPositionForAllPeer(Connection connection,
+      byte[] encodedRegionName) throws IOException {
+    Get get = new Get(encodedRegionName);
+    get.addFamily(HConstants.REPLICATION_POSITION_FAMILY);
+    Result r = get(getMetaHTable(connection), get);
+    Map<String, Long> map = new HashMap<>((int) (r.size() / 0.75 + 1));
+    for (Cell c : r.listCells()) {
+      if (!Bytes.equals(tableNamePosCq, 0, tableNamePosCq.length, c.getQualifierArray(),
+          c.getQualifierOffset(), c.getQualifierLength()) &&
+          !Bytes.equals(daughterNamePosCq, 0, daughterNamePosCq.length, c.getQualifierArray(),
+          c.getQualifierOffset(), c.getQualifierLength())) {
+        map.put(
+            Bytes.toString(c.getQualifierArray(), c.getQualifierOffset(), c.getQualifierLength()),
+            Bytes.toLong(c.getValueArray(), c.getValueOffset(), c.getValueLength()));
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Get replication barriers for all peers in a region.
+   * @param encodedRegionName region's encoded name
+   * @return a list of barrier sequence numbers.
+   * @throws IOException
+   */
+  public static List<Long> getReplicationBarriers(Connection connection, byte[] encodedRegionName)
+      throws IOException {
+    Get get = new Get(encodedRegionName);
+    get.addFamily(HConstants.REPLICATION_BARRIER_FAMILY);
+    Result r = get(getMetaHTable(connection), get);
+    List<Long> list = new ArrayList<>();
+    if (!r.isEmpty()) {
+      for (Cell cell : r.rawCells()) {
+        list.add(Bytes.toLong(cell.getQualifierArray(), cell.getQualifierOffset(),
+            cell.getQualifierLength()));
+      }
+    }
+    return list;
+  }
+
+  /**
+   * Get all barriers in all regions.
+   * @return a map of barrier lists in all regions
+   * @throws IOException
+   */
+  public static Map<String, List<Long>> getAllBarriers(Connection connection) throws IOException {
+    Map<String, List<Long>> map = new HashMap<>();
+    Scan scan = new Scan();
+    scan.addFamily(HConstants.REPLICATION_BARRIER_FAMILY);
+    try (Table t = getMetaHTable(connection);
+        ResultScanner scanner = t.getScanner(scan)) {
+      Result result;
+      while ((result = scanner.next()) != null) {
+        String key = Bytes.toString(result.getRow());
+        List<Long> list = new ArrayList<>();
+        for (Cell cell : result.rawCells()) {
+          list.add(Bytes.toLong(cell.getQualifierArray(), cell.getQualifierOffset(),
+              cell.getQualifierLength()));
+        }
+        map.put(key, list);
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Get daughter region(s) for a region, only used in serial replication.
+   * @throws IOException
+   */
+  public static String getSerialReplicationDaughterRegion(Connection connection, byte[] encodedName)
+      throws IOException {
+    Get get = new Get(encodedName);
+    get.addColumn(HConstants.REPLICATION_POSITION_FAMILY, daughterNamePosCq);
+    Result result = get(getMetaHTable(connection), get);
+    if (!result.isEmpty()) {
+      Cell c = result.rawCells()[0];
+      return Bytes.toString(c.getValueArray(), c.getValueOffset(), c.getValueLength());
+    }
+    return null;
+  }
+
+  /**
+   * Get the table name for a region, only used in serial replication.
+   * @throws IOException
+   */
+  public static String getSerialReplicationTableName(Connection connection, byte[] encodedName)
+      throws IOException {
+    Get get = new Get(encodedName);
+    get.addColumn(HConstants.REPLICATION_POSITION_FAMILY, tableNamePosCq);
+    Result result = get(getMetaHTable(connection), get);
+    if (!result.isEmpty()) {
+      Cell c = result.rawCells()[0];
+      return Bytes.toString(c.getValueArray(), c.getValueOffset(), c.getValueLength());
+    }
+    return null;
   }
 }

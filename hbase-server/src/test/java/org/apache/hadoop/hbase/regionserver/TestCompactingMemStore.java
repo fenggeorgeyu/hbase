@@ -58,15 +58,15 @@ import static org.junit.Assert.assertTrue;
 public class TestCompactingMemStore extends TestDefaultMemStore {
 
   private static final Log LOG = LogFactory.getLog(TestCompactingMemStore.class);
-  private static MemStoreChunkPool chunkPool;
-  private HRegion region;
-  private RegionServicesForStores regionServicesForStores;
-  private HStore store;
+  protected static MemStoreChunkPool chunkPool;
+  protected HRegion region;
+  protected RegionServicesForStores regionServicesForStores;
+  protected HStore store;
 
   //////////////////////////////////////////////////////////////////////////////
   // Helpers
   //////////////////////////////////////////////////////////////////////////////
-  private static byte[] makeQualifier(final int i1, final int i2) {
+  protected static byte[] makeQualifier(final int i1, final int i2) {
     return Bytes.toBytes(Integer.toString(i1) + ";" +
         Integer.toString(i2));
   }
@@ -79,6 +79,12 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
   @Override
   @Before
   public void setUp() throws Exception {
+    compactingSetUp();
+    this.memstore = new CompactingMemStore(HBaseConfiguration.create(), CellComparator.COMPARATOR,
+        store, regionServicesForStores);
+  }
+
+  protected void compactingSetUp() throws Exception {
     super.internalSetUp();
     Configuration conf = new Configuration();
     conf.setBoolean(SegmentFactory.USEMSLAB_KEY, true);
@@ -89,12 +95,10 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
     this.region = hbaseUtility.createTestRegion("foobar", hcd);
     this.regionServicesForStores = region.getRegionServicesForStores();
     this.store = new HStore(region, hcd, conf);
-    this.memstore = new CompactingMemStore(HBaseConfiguration.create(), CellComparator.COMPARATOR,
-        store, regionServicesForStores);
+
     chunkPool = MemStoreChunkPool.getPool(conf);
     assertTrue(chunkPool != null);
   }
-
 
   /**
    * A simple test which verifies the 3 possible states when scanning across snapshot.
@@ -373,7 +377,7 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
   private long runSnapshot(final AbstractMemStore hmc, boolean useForce)
       throws IOException {
     // Save off old state.
-    long oldHistorySize = hmc.getSnapshot().getSize();
+    long oldHistorySize = hmc.getSnapshot().keySize();
     long prevTimeStamp = hmc.timeOfOldestEdit();
 
     hmc.snapshot();
@@ -543,10 +547,6 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
     memstore.add(new KeyValue(row, fam, qf1, 3, val));
     assertEquals(3, memstore.getActive().getCellsCount());
 
-    while (((CompactingMemStore)memstore).isMemStoreFlushingInMemory()) {
-      Threads.sleep(10);
-    }
-
     assertTrue(chunkPool.getPoolSize() == 0);
 
     // Chunks will be put back to pool after close scanners;
@@ -593,11 +593,8 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
 
     long size = memstore.getFlushableSize();
     ((CompactingMemStore)memstore).flushInMemory(); // push keys to pipeline and compact
-    while (((CompactingMemStore)memstore).isMemStoreFlushingInMemory()) {
-      Threads.sleep(10);
-    }
     assertEquals(0, memstore.getSnapshot().getCellsCount());
-    assertEquals(376, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(264, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     size = memstore.getFlushableSize();
     MemStoreSnapshot snapshot = memstore.snapshot(); // push keys to snapshot
@@ -621,22 +618,21 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
 
     long size = memstore.getFlushableSize();
     ((CompactingMemStore)memstore).flushInMemory(); // push keys to pipeline and compact
-    while (((CompactingMemStore)memstore).isMemStoreFlushingInMemory()) {
-      Threads.sleep(1000);
+    int counter = 0;
+    for ( Segment s : memstore.getSegments()) {
+      counter += s.getCellsCount();
     }
+    assertEquals(3, counter);
     assertEquals(0, memstore.getSnapshot().getCellsCount());
-    assertEquals(376, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(264, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     addRowsByKeys(memstore, keys2);
-    assertEquals(752, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(640, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     size = memstore.getFlushableSize();
     ((CompactingMemStore)memstore).flushInMemory(); // push keys to pipeline and compact
-    while (((CompactingMemStore)memstore).isMemStoreFlushingInMemory()) {
-      Threads.sleep(10);
-    }
     assertEquals(0, memstore.getSnapshot().getCellsCount());
-    assertEquals(496, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(368, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     size = memstore.getFlushableSize();
     MemStoreSnapshot snapshot = memstore.snapshot(); // push keys to snapshot
@@ -663,11 +659,8 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
 
     String tstStr = "\n\nFlushable size after first flush in memory:" + size
         + ". Is MemmStore in compaction?:" + ((CompactingMemStore)memstore).isMemStoreFlushingInMemory();
-    while (((CompactingMemStore)memstore).isMemStoreFlushingInMemory()) {
-      Threads.sleep(10);
-    }
     assertEquals(0, memstore.getSnapshot().getCellsCount());
-    assertEquals(376, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(264, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     addRowsByKeys(memstore, keys2);
 
@@ -675,16 +668,16 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
         region.getMemstoreSize() + ", Memstore Total Size: " +
         regionServicesForStores.getGlobalMemstoreTotalSize() + "\n\n";
 
-    assertEquals(752, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(640, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     ((CompactingMemStore)memstore).disableCompaction();
     size = memstore.getFlushableSize();
     ((CompactingMemStore)memstore).flushInMemory(); // push keys to pipeline without compaction
     assertEquals(0, memstore.getSnapshot().getCellsCount());
-    assertEquals(752, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(640, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     addRowsByKeys(memstore, keys3);
-    assertEquals(1128, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(1016, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     ((CompactingMemStore)memstore).enableCompaction();
     size = memstore.getFlushableSize();
@@ -693,7 +686,7 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
       Threads.sleep(10);
     }
     assertEquals(0, memstore.getSnapshot().getCellsCount());
-    assertEquals(496, regionServicesForStores.getGlobalMemstoreTotalSize());
+    assertEquals(384, regionServicesForStores.getGlobalMemstoreTotalSize());
 
     size = memstore.getFlushableSize();
     MemStoreSnapshot snapshot = memstore.snapshot(); // push keys to snapshot
@@ -710,7 +703,7 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
   private void addRowsByKeys(final AbstractMemStore hmc, String[] keys) {
     byte[] fam = Bytes.toBytes("testfamily");
     byte[] qf = Bytes.toBytes("testqualifier");
-    long size = hmc.getActive().getSize();
+    long size = hmc.getActive().keySize();
     for (int i = 0; i < keys.length; i++) {
       long timestamp = System.currentTimeMillis();
       Threads.sleep(1); // to make sure each kv gets a different ts
@@ -720,7 +713,7 @@ public class TestCompactingMemStore extends TestDefaultMemStore {
       hmc.add(kv);
       LOG.debug("added kv: " + kv.getKeyString() + ", timestamp:" + kv.getTimestamp());
     }
-    regionServicesForStores.addAndGetGlobalMemstoreSize(hmc.getActive().getSize() - size);
+    regionServicesForStores.addAndGetGlobalMemstoreSize(hmc.getActive().keySize() - size);
   }
 
   private class EnvironmentEdgeForMemstoreTest implements EnvironmentEdge {

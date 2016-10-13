@@ -17,10 +17,6 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.Message;
-import com.google.protobuf.RpcController;
-import com.google.protobuf.Service;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
@@ -48,10 +44,13 @@ import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.exceptions.FailedSanityCheckException;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.GetRegionInfoResponse.CompactionState;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.CoprocessorServiceCall;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoResponse.CompactionState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CoprocessorServiceCall;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.Service;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.WALSplitter.MutationReplay;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Regions store data for a certain region of a table.  It stores all columns
@@ -141,10 +140,10 @@ public interface Region extends ConfigurationObserver {
 
   /**
    * This can be used to determine the last time all files of this region were major compacted.
-   * @param majorCompactioOnly Only consider HFile that are the result of major compaction
+   * @param majorCompactionOnly Only consider HFile that are the result of major compaction
    * @return the timestamp of the oldest HFile for all stores of this region
    */
-  long getOldestHfileTs(boolean majorCompactioOnly) throws IOException;
+  long getOldestHfileTs(boolean majorCompactionOnly) throws IOException;
 
   /**
    * @return map of column family names to max sequence id that was read from storage when this
@@ -395,6 +394,17 @@ public interface Region extends ConfigurationObserver {
   List<Cell> get(Get get, boolean withCoprocessor) throws IOException;
 
   /**
+   * Do a get for duplicate non-idempotent operation.
+   * @param get query parameters.
+   * @param withCoprocessor
+   * @param nonceGroup Nonce group.
+   * @param nonce Nonce.
+   * @return list of cells resulting from the operation
+   * @throws IOException
+   */
+  List<Cell> get(Get get, boolean withCoprocessor, long nonceGroup, long nonce) throws IOException;
+
+  /**
    * Return an iterator that scans over the HRegion, returning the indicated
    * columns and rows specified by the {@link Scan}.
    * <p>
@@ -501,7 +511,6 @@ public interface Region extends ConfigurationObserver {
    * pre/post processing of a given bulkload call
    */
   interface BulkLoadListener {
-
     /**
      * Called before an HFile is actually loaded
      * @param family family being loaded to
@@ -509,7 +518,8 @@ public interface Region extends ConfigurationObserver {
      * @return final path to be used for actual loading
      * @throws IOException
      */
-    String prepareBulkLoad(byte[] family, String srcPath) throws IOException;
+    String prepareBulkLoad(byte[] family, String srcPath, boolean copyFile)
+        throws IOException;
 
     /**
      * Called after a successful HFile load
@@ -542,6 +552,21 @@ public interface Region extends ConfigurationObserver {
   boolean bulkLoadHFiles(Collection<Pair<byte[], String>> familyPaths, boolean assignSeqId,
       BulkLoadListener bulkLoadListener) throws IOException;
 
+  /**
+   * Attempts to atomically load a group of hfiles.  This is critical for loading
+   * rows with multiple column families atomically.
+   *
+   * @param familyPaths List of Pair&lt;byte[] column family, String hfilePath&gt;
+   * @param assignSeqId
+   * @param bulkLoadListener Internal hooks enabling massaging/preparation of a
+   * file about to be bulk loaded
+   * @param copyFile always copy hfiles if true
+   * @return true if successful, false if failed recoverably
+   * @throws IOException if failed unrecoverably.
+   */
+  boolean bulkLoadHFiles(Collection<Pair<byte[], String>> familyPaths, boolean assignSeqId,
+      BulkLoadListener bulkLoadListener, boolean copyFile) throws IOException;
+
   ///////////////////////////////////////////////////////////////////////////
   // Coprocessors
 
@@ -562,13 +587,14 @@ public interface Region extends ConfigurationObserver {
    *     occurs during the invocation
    * @see org.apache.hadoop.hbase.regionserver.Region#registerService(com.google.protobuf.Service)
    */
-  Message execService(RpcController controller, CoprocessorServiceCall call) throws IOException;
+  com.google.protobuf.Message execService(com.google.protobuf.RpcController controller,
+      CoprocessorServiceCall call)
+  throws IOException;
 
   /**
    * Registers a new protocol buffer {@link Service} subclass as a coprocessor endpoint to
-   * be available for handling
-   * {@link Region#execService(com.google.protobuf.RpcController,
-   *    org.apache.hadoop.hbase.protobuf.generated.ClientProtos.CoprocessorServiceCall)}} calls.
+   * be available for handling Region#execService(com.google.protobuf.RpcController,
+   *    org.apache.hadoop.hbase.protobuf.generated.ClientProtos.CoprocessorServiceCall) calls.
    *
    * <p>
    * Only a single instance may be registered per region for a given {@link Service} subclass (the
@@ -580,7 +606,7 @@ public interface Region extends ConfigurationObserver {
    * @return {@code true} if the registration was successful, {@code false}
    * otherwise
    */
-  boolean registerService(Service instance);
+  boolean registerService(com.google.protobuf.Service instance);
 
   ///////////////////////////////////////////////////////////////////////////
   // RowMutation processor support

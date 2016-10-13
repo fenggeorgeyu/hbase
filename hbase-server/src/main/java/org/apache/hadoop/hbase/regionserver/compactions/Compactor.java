@@ -19,7 +19,6 @@ package org.apache.hadoop.hbase.regionserver.compactions;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -39,11 +38,13 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFile.FileInfo;
+import org.apache.hadoop.hbase.regionserver.CellSink;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
 import org.apache.hadoop.hbase.regionserver.ScanType;
 import org.apache.hadoop.hbase.regionserver.ScannerContext;
+import org.apache.hadoop.hbase.regionserver.ShipperListener;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileReader;
@@ -51,7 +52,6 @@ import org.apache.hadoop.hbase.regionserver.StoreFileScanner;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.regionserver.StoreScanner;
 import org.apache.hadoop.hbase.regionserver.TimeRangeTracker;
-import org.apache.hadoop.hbase.regionserver.compactions.Compactor.CellSink;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputControlUtil;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.security.User;
@@ -89,10 +89,6 @@ public abstract class Compactor<T extends CellSink> {
         Compression.Algorithm.NONE : this.store.getFamily().getCompactionCompressionType();
     this.keepSeqIdPeriod = Math.max(this.conf.getInt(HConstants.KEEP_SEQID_PERIOD, 
       HConstants.MIN_KEEP_SEQID_PERIOD), HConstants.MIN_KEEP_SEQID_PERIOD);
-  }
-
-  public interface CellSink {
-    void append(Cell cell) throws IOException;
   }
 
   protected interface CellSinkFactory<S> {
@@ -310,7 +306,7 @@ public abstract class Compactor<T extends CellSink> {
       }
       writer = sinkFactory.createWriter(scanner, fd, store.throttleCompaction(request.getSize()));
       finished = performCompaction(fd, scanner, writer, smallestReadPoint, cleanSeqId,
-        throughputController, request.isAllFiles());
+        throughputController, request.isAllFiles(), request.getFiles().size());
       if (!finished) {
         throw new InterruptedIOException("Aborting compaction of store " + store + " in region "
             + store.getRegionInfo().getRegionNameAsString() + " because it was interrupted.");
@@ -357,24 +353,8 @@ public abstract class Compactor<T extends CellSink> {
     if (store.getCoprocessorHost() == null) {
       return null;
     }
-    if (user == null) {
-      return store.getCoprocessorHost().preCompactScannerOpen(store, scanners, scanType,
-        earliestPutTs, request);
-    } else {
-      try {
-        return user.getUGI().doAs(new PrivilegedExceptionAction<InternalScanner>() {
-          @Override
-          public InternalScanner run() throws Exception {
-            return store.getCoprocessorHost().preCompactScannerOpen(store, scanners,
-              scanType, earliestPutTs, request);
-          }
-        });
-      } catch (InterruptedException ie) {
-        InterruptedIOException iioe = new InterruptedIOException();
-        iioe.initCause(ie);
-        throw iioe;
-      }
-    }
+    return store.getCoprocessorHost().preCompactScannerOpen(store, scanners, scanType,
+        earliestPutTs, request, user);
   }
 
   /**
@@ -389,22 +369,7 @@ public abstract class Compactor<T extends CellSink> {
     if (store.getCoprocessorHost() == null) {
       return scanner;
     }
-    if (user == null) {
-      return store.getCoprocessorHost().preCompact(store, scanner, scanType, request);
-    } else {
-      try {
-        return user.getUGI().doAs(new PrivilegedExceptionAction<InternalScanner>() {
-          @Override
-          public InternalScanner run() throws Exception {
-            return store.getCoprocessorHost().preCompact(store, scanner, scanType, request);
-          }
-        });
-      } catch (InterruptedException ie) {
-        InterruptedIOException iioe = new InterruptedIOException();
-        iioe.initCause(ie);
-        throw iioe;
-      }
-    }
+    return store.getCoprocessorHost().preCompact(store, scanner, scanType, request, user);
   }
 
   /**
@@ -416,11 +381,13 @@ public abstract class Compactor<T extends CellSink> {
    * @param cleanSeqId When true, remove seqId(used to be mvcc) value which is &lt;=
    *          smallestReadPoint
    * @param major Is a major compaction.
+   * @param numofFilesToCompact the number of files to compact
    * @return Whether compaction ended; false if it was interrupted for some reason.
    */
   protected boolean performCompaction(FileDetails fd, InternalScanner scanner, CellSink writer,
-      long smallestReadPoint, boolean cleanSeqId,
-      ThroughputController throughputController, boolean major) throws IOException {
+      long smallestReadPoint, boolean cleanSeqId, ThroughputController throughputController,
+      boolean major, int numofFilesToCompact) throws IOException {
+    assert writer instanceof ShipperListener;
     long bytesWrittenProgressForCloseCheck = 0;
     long bytesWrittenProgressForLog = 0;
     long bytesWrittenProgressForShippedCall = 0;
@@ -440,10 +407,7 @@ public abstract class Compactor<T extends CellSink> {
 
     throughputController.start(compactionName);
     KeyValueScanner kvs = (scanner instanceof KeyValueScanner)? (KeyValueScanner)scanner : null;
-    long minFilesToCompact = Math.max(2L,
-        conf.getInt(CompactionConfiguration.HBASE_HSTORE_COMPACTION_MIN_KEY,
-            /* old name */ conf.getInt("hbase.hstore.compactionThreshold", 3)));
-    long shippedCallSizeLimit = (long) minFilesToCompact * HConstants.DEFAULT_BLOCKSIZE;
+    long shippedCallSizeLimit = (long) numofFilesToCompact * this.store.getFamily().getBlocksize();
     try {
       do {
         hasMore = scanner.next(cells, scannerContext);
@@ -476,6 +440,9 @@ public abstract class Compactor<T extends CellSink> {
             }
           }
           if (kvs != null && bytesWrittenProgressForShippedCall > shippedCallSizeLimit) {
+            // Clone the cells that are in the writer so that they are freed of references,
+            // if they are holding any.
+            ((ShipperListener)writer).beforeShipped();
             // The SHARED block references, being read for compaction, will be kept in prevBlocks
             // list(See HFileScannerImpl#prevBlocks). In case of scan flow, after each set of cells
             // being returned to client, we will call shipped() which can clear this list. Here by

@@ -95,7 +95,7 @@ public class TestServerCrashProcedure {
     try (Table t = this.util.getConnection().getTable(tableName)) {
       // Load the table with a bit of data so some logs to split and some edits in each region.
       this.util.loadTable(t, HBaseTestingUtility.COLUMNS[0]);
-      int count = countRows(t);
+      int count = util.countRows(t);
       // Run the procedure executor outside the master so we can mess with it. Need to disable
       // Master's running of the server crash processing.
       HMaster master = this.util.getHBaseCluster().getMaster();
@@ -118,19 +118,12 @@ public class TestServerCrashProcedure {
       ProcedureTestingUtility.waitNoProcedureRunning(procExec);
       ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
       long procId =
-        procExec.submitProcedure(new ServerCrashProcedure(hrs.getServerName(), true, carryingMeta));
+        procExec.submitProcedure(new ServerCrashProcedure(
+          procExec.getEnvironment(), hrs.getServerName(), true, carryingMeta));
       // Now run through the procedure twice crashing the executor on each step...
       MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId);
       // Assert all data came back.
-      assertEquals(count, countRows(t));
+      assertEquals(count, util.countRows(t));
     }
-  }
-
-  int countRows(final Table t) throws IOException {
-    int count = 0;
-    try (ResultScanner scanner = t.getScanner(new Scan())) {
-      while(scanner.next() != null) count++;
-    }
-    return count;
   }
 }

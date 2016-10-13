@@ -19,8 +19,6 @@
 package org.apache.hadoop.hbase.procedure2.store;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
@@ -28,7 +26,7 @@ import java.util.TreeMap;
 
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos;
 
 /**
  * Keeps track of live procedures.
@@ -40,7 +38,7 @@ import org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos;
 @InterfaceStability.Evolving
 public class ProcedureStoreTracker {
   // Key is procedure id corresponding to first bit of the bitmap.
-  private final TreeMap<Long, BitSetNode> map = new TreeMap<Long, BitSetNode>();
+  private final TreeMap<Long, BitSetNode> map = new TreeMap<>();
 
   /**
    * If true, do not remove bits corresponding to deleted procedures. Note that this can result
@@ -78,6 +76,16 @@ public class ProcedureStoreTracker {
      * Mimics {@link ProcedureStoreTracker#partial}.
      */
     private final boolean partial;
+
+    /* ----------------------
+     * |  updated | deleted |  meaning
+     * |     0    |   0     |  proc exists, but hasn't been updated since last resetUpdates().
+     * |     1    |   0     |  proc was updated (but not deleted).
+     * |     1    |   1     |  proc was deleted.
+     * |     0    |   1     |  proc doesn't exist (maybe never created, maybe deleted in past).
+    /* ----------------------
+     */
+
     /**
      * Set of procedures which have been updated since last {@link #resetUpdates()}.
      * Useful to track procedures which have been updated since last WAL write.
@@ -85,6 +93,7 @@ public class ProcedureStoreTracker {
     private long[] updated;
     /**
      * Keeps track of procedure ids which belong to this bitmap's range and have been deleted.
+     * This represents global state since it's not reset on WAL rolls.
      */
     private long[] deleted;
     /**
@@ -133,6 +142,25 @@ public class ProcedureStoreTracker {
       this.updated = updated;
       this.deleted = deleted;
       this.partial = false;
+    }
+
+    public BitSetNode(ProcedureProtos.ProcedureStoreTracker.TrackerNode data) {
+      start = data.getStartId();
+      int size = data.getUpdatedCount();
+      updated = new long[size];
+      deleted = new long[size];
+      for (int i = 0; i < size; ++i) {
+        updated[i] = data.getUpdated(i);
+        deleted[i] = data.getDeleted(i);
+      }
+      partial = false;
+    }
+
+    public BitSetNode(BitSetNode other) {
+      this.start = other.start;
+      this.partial = other.partial;
+      this.updated = other.updated.clone();
+      this.deleted = other.deleted.clone();
     }
 
     public void update(final long procId) {
@@ -221,10 +249,38 @@ public class ProcedureStoreTracker {
       }
     }
 
-    // ========================================================================
-    //  Convert to/from Protocol Buffer.
-    // ========================================================================
+    /**
+     * If an active (non-deleted) procedure in current BitSetNode has been updated in {@code other}
+     * BitSetNode, then delete it from current node.
+     * @return true if node changed, i.e. some procedure(s) from {@code other} was subtracted from
+     * current node.
+     */
+    public boolean subtract(BitSetNode other) {
+      // Assert that other node intersects with this node.
+      assert !(other.getEnd() < this.start) && !(this.getEnd() < other.start);
+      int thisOffset = 0, otherOffset = 0;
+      if (this.start < other.start) {
+        thisOffset = (int) (other.start - this.start) / BITS_PER_WORD;
+      } else {
+        otherOffset = (int) (this.start - other.start) / BITS_PER_WORD;
+      }
+      int size = Math.min(this.updated.length - thisOffset, other.updated.length - otherOffset);
+      boolean nonZeroIntersect = false;
+      for (int i = 0; i < size; i++) {
+        long intersect = ~this.deleted[thisOffset + i] & other.updated[otherOffset + i];
+        if (intersect != 0) {
+          this.deleted[thisOffset + i] |= intersect;
+          nonZeroIntersect = true;
+        }
+      }
+      return nonZeroIntersect;
+    }
 
+    /**
+     * Convert to
+     * org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureStoreTracker.TrackerNode
+     * protobuf.
+     */
     public ProcedureProtos.ProcedureStoreTracker.TrackerNode convert() {
       ProcedureProtos.ProcedureStoreTracker.TrackerNode.Builder builder =
         ProcedureProtos.ProcedureStoreTracker.TrackerNode.newBuilder();
@@ -236,17 +292,6 @@ public class ProcedureStoreTracker {
       return builder.build();
     }
 
-    public static BitSetNode convert(ProcedureProtos.ProcedureStoreTracker.TrackerNode data) {
-      long start = data.getStartId();
-      int size = data.getUpdatedCount();
-      long[] updated = new long[size];
-      long[] deleted = new long[size];
-      for (int i = 0; i < size; ++i) {
-        updated[i] = data.getUpdated(i);
-        deleted[i] = data.getDeleted(i);
-      }
-      return new BitSetNode(start, updated, deleted);
-    }
 
     // ========================================================================
     //  Grow/Merge Helpers
@@ -378,14 +423,14 @@ public class ProcedureStoreTracker {
       int wordIndex = bitmapIndex >> ADDRESS_BITS_PER_WORD;
       long value = (1L << bitmapIndex);
 
+      updated[wordIndex] |= value;
       if (isDeleted) {
-        updated[wordIndex] |= value;
         deleted[wordIndex] |= value;
       } else {
-        updated[wordIndex] |= value;
         deleted[wordIndex] &= ~value;
       }
     }
+
 
     // ========================================================================
     //  Helpers
@@ -402,6 +447,27 @@ public class ProcedureStoreTracker {
      */
     private static long alignDown(final long x) {
       return x & -BITS_PER_WORD;
+    }
+  }
+
+  public void resetToProto(final ProcedureProtos.ProcedureStoreTracker trackerProtoBuf) {
+    reset();
+    for (ProcedureProtos.ProcedureStoreTracker.TrackerNode protoNode: trackerProtoBuf.getNodeList()) {
+      final BitSetNode node = new BitSetNode(protoNode);
+      map.put(node.getStart(), node);
+    }
+  }
+
+  /**
+   * Resets internal state to same as given {@code tracker}. Does deep copy of the bitmap.
+   */
+  public void resetTo(ProcedureStoreTracker tracker) {
+    this.partial = tracker.partial;
+    this.minUpdatedProcId = tracker.minUpdatedProcId;
+    this.maxUpdatedProcId = tracker.maxUpdatedProcId;
+    this.keepDeletes = tracker.keepDeletes;
+    for (Map.Entry<Long, BitSetNode> entry : tracker.map.entrySet()) {
+      map.put(entry.getKey(), new BitSetNode(entry.getValue()));
     }
   }
 
@@ -470,6 +536,7 @@ public class ProcedureStoreTracker {
     BitSetNode node = getOrCreateNode(procId);
     assert node.contains(procId) : "expected procId=" + procId + " in the node=" + node;
     node.updateState(procId, isDeleted);
+    trackProcIds(procId);
   }
 
   public void reset() {
@@ -477,6 +544,11 @@ public class ProcedureStoreTracker {
     this.partial = false;
     this.map.clear();
     resetUpdates();
+  }
+
+  public boolean isUpdated(long procId) {
+    final Map.Entry<Long, BitSetNode> entry = map.floorEntry(procId);
+    return entry != null && entry.getValue().contains(procId) && entry.getValue().isUpdated(procId);
   }
 
   /**
@@ -517,6 +589,10 @@ public class ProcedureStoreTracker {
     }
   }
 
+  public boolean isPartial() {
+    return partial;
+  }
+
   public void setPartialFlag(boolean isPartial) {
     if (this.partial && !isPartial) {
       for (Map.Entry<Long, BitSetNode> entry : map.entrySet()) {
@@ -531,7 +607,7 @@ public class ProcedureStoreTracker {
    */
   public boolean isEmpty() {
     for (Map.Entry<Long, BitSetNode> entry : map.entrySet()) {
-      if (entry.getValue().isEmpty() == false) {
+      if (!entry.getValue().isEmpty()) {
         return false;
       }
     }
@@ -543,7 +619,7 @@ public class ProcedureStoreTracker {
    */
   public boolean isUpdated() {
     for (Map.Entry<Long, BitSetNode> entry : map.entrySet()) {
-      if (entry.getValue().isUpdated() == false) {
+      if (!entry.getValue().isUpdated()) {
         return false;
       }
     }
@@ -656,31 +732,51 @@ public class ProcedureStoreTracker {
   }
 
   /**
-   * Builds
-   * {@link org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureStoreTracker}
-   * protocol buffer from current state, serializes it and writes to the {@code stream}.
+   * Iterates over
+   * {@link BitSetNode}s in this.map and subtracts with corresponding ones from {@code other}
+   * tracker.
+   * @return true if tracker changed, i.e. some procedure from {@code other} were subtracted from
+   * current tracker.
    */
-  public void writeTo(final OutputStream stream) throws IOException {
+  public boolean subtract(ProcedureStoreTracker other) {
+    // Can not intersect partial bitmap.
+    assert !partial && !other.partial;
+    boolean nonZeroIntersect = false;
+    for (Map.Entry<Long, BitSetNode> currentEntry : map.entrySet()) {
+      BitSetNode currentBitSetNode = currentEntry.getValue();
+      Map.Entry<Long, BitSetNode> otherTrackerEntry = other.map.floorEntry(currentEntry.getKey());
+      if (otherTrackerEntry == null  // No node in other map with key <= currentEntry.getKey().
+          // First entry in other map doesn't intersect with currentEntry.
+          || otherTrackerEntry.getValue().getEnd() < currentEntry.getKey()) {
+        otherTrackerEntry = other.map.ceilingEntry(currentEntry.getKey());
+        if (otherTrackerEntry == null || !currentBitSetNode.contains(otherTrackerEntry.getKey())) {
+          // No node in other map intersects with currentBitSetNode's range.
+          continue;
+        }
+      }
+      do {
+        nonZeroIntersect |= currentEntry.getValue().subtract(otherTrackerEntry.getValue());
+        otherTrackerEntry = other.map.higherEntry(otherTrackerEntry.getKey());
+      } while (otherTrackerEntry != null && currentBitSetNode.contains(otherTrackerEntry.getKey()));
+    }
+    return nonZeroIntersect;
+  }
+
+  // ========================================================================
+  //  Convert to/from Protocol Buffer.
+  // ========================================================================
+
+  /**
+   * Builds
+   * org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureStoreTracker
+   * protocol buffer from current state.
+   */
+  public ProcedureProtos.ProcedureStoreTracker toProto() throws IOException {
     ProcedureProtos.ProcedureStoreTracker.Builder builder =
         ProcedureProtos.ProcedureStoreTracker.newBuilder();
     for (Map.Entry<Long, BitSetNode> entry : map.entrySet()) {
       builder.addNode(entry.getValue().convert());
     }
-    builder.build().writeDelimitedTo(stream);
-  }
-
-  /**
-   * Reads serialized
-   * {@link org.apache.hadoop.hbase.protobuf.generated.ProcedureProtos.ProcedureStoreTracker}
-   * protocol buffer from the {@code stream}, and use it to build the state.
-   */
-  public void readFrom(final InputStream stream) throws IOException {
-    reset();
-    final ProcedureProtos.ProcedureStoreTracker data =
-        ProcedureProtos.ProcedureStoreTracker.parseDelimitedFrom(stream);
-    for (ProcedureProtos.ProcedureStoreTracker.TrackerNode protoNode: data.getNodeList()) {
-      final BitSetNode node = BitSetNode.convert(protoNode);
-      map.put(node.getStart(), node);
-    }
+    return builder.build();
   }
 }

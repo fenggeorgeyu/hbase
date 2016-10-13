@@ -21,11 +21,9 @@ package org.apache.hadoop.hbase.master.procedure;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.security.PrivilegedExceptionAction;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -35,7 +33,6 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Connection;
@@ -45,40 +42,37 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.ModifyTableState;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ModifyTableState;
 import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
-import org.apache.hadoop.security.UserGroupInformation;
 
 @InterfaceAudience.Private
 public class ModifyTableProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, ModifyTableState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineTableProcedure<ModifyTableState> {
   private static final Log LOG = LogFactory.getLog(ModifyTableProcedure.class);
-
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
 
   private HTableDescriptor unmodifiedHTableDescriptor = null;
   private HTableDescriptor modifiedHTableDescriptor;
-  private UserGroupInformation user;
   private boolean deleteColumnFamilyInModify;
 
   private List<HRegionInfo> regionInfoList;
   private Boolean traceEnabled = null;
 
   public ModifyTableProcedure() {
+    super();
     initilize();
   }
 
-  public ModifyTableProcedure(
-    final MasterProcedureEnv env,
-    final HTableDescriptor htd) throws IOException {
+  public ModifyTableProcedure(final MasterProcedureEnv env, final HTableDescriptor htd) {
+    this(env, htd, null);
+  }
+
+  public ModifyTableProcedure(final MasterProcedureEnv env, final HTableDescriptor htd,
+      final ProcedurePrepareLatch latch) {
+    super(env, latch);
     initilize();
     this.modifiedHTableDescriptor = htd;
-    this.user = env.getRequestUser().getUGI();
-    this.setOwner(this.user.getShortUserName());
   }
 
   private void initilize() {
@@ -132,12 +126,11 @@ public class ModifyTableProcedure
         throw new UnsupportedOperationException("unhandled state=" + state);
       }
     } catch (IOException e) {
-      if (!isRollbackSupported(state)) {
-        // We reach a state that cannot be rolled back. We just need to keep retry.
-        LOG.warn("Error trying to modify table=" + getTableName() + " state=" + state, e);
-      } else {
-        LOG.error("Error trying to modify table=" + getTableName() + " state=" + state, e);
+      if (isRollbackSupported(state)) {
         setFailure("master-modify-table", e);
+      } else {
+        LOG.warn("Retriable error trying to modify table=" + getTableName() +
+          " (in state=" + state + ")", e);
       }
     }
     return Flow.HAS_MORE_STATE;
@@ -146,42 +139,31 @@ public class ModifyTableProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final ModifyTableState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
+    if (state == ModifyTableState.MODIFY_TABLE_PREPARE ||
+        state == ModifyTableState.MODIFY_TABLE_PRE_OPERATION) {
+      // nothing to rollback, pre-modify is just checks.
+      // TODO: coprocessor rollback semantic is still undefined.
+      return;
     }
-    try {
-      switch (state) {
-      case MODIFY_TABLE_REOPEN_ALL_REGIONS:
-        break; // Nothing to undo.
-      case MODIFY_TABLE_POST_OPERATION:
-        // TODO-MAYBE: call the coprocessor event to un-modify?
-        break;
-      case MODIFY_TABLE_DELETE_FS_LAYOUT:
-        // Once we reach to this state - we could NOT rollback - as it is tricky to undelete
-        // the deleted files. We are not suppose to reach here, throw exception so that we know
-        // there is a code bug to investigate.
-        assert deleteColumnFamilyInModify;
-        throw new UnsupportedOperationException(this + " rollback of state=" + state
-            + " is unsupported.");
-      case MODIFY_TABLE_REMOVE_REPLICA_COLUMN:
-        // Undo the replica column update.
-        updateReplicaColumnsIfNeeded(env, modifiedHTableDescriptor, unmodifiedHTableDescriptor);
-        break;
-      case MODIFY_TABLE_UPDATE_TABLE_DESCRIPTOR:
-        restoreTableDescriptor(env);
-        break;
+
+    // The delete doesn't have a rollback. The execution will succeed, at some point.
+    throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final ModifyTableState state) {
+    switch (state) {
       case MODIFY_TABLE_PRE_OPERATION:
-        // TODO-MAYBE: call the coprocessor event to un-modify?
-        break;
       case MODIFY_TABLE_PREPARE:
-        break; // Nothing to undo.
+        return true;
       default:
-        throw new UnsupportedOperationException("unhandled state=" + state);
-      }
-    } catch (IOException e) {
-      LOG.warn("Fail trying to rollback modify table=" + getTableName() + " state=" + state, e);
-      throw e;
+        return false;
     }
+  }
+
+  @Override
+  protected void completionCleanup(final MasterProcedureEnv env) {
+    releaseSyncLatch();
   }
 
   @Override
@@ -200,38 +182,12 @@ public class ModifyTableProcedure
   }
 
   @Override
-  protected void setNextState(final ModifyTableState state) {
-    if (aborted.get() && isRollbackSupported(state)) {
-      setAbortFailure("modify-table", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
-  }
-
-  @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, getTableName());
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, getTableName());
-  }
-
-  @Override
   public void serializeStateData(final OutputStream stream) throws IOException {
     super.serializeStateData(stream);
 
     MasterProcedureProtos.ModifyTableStateData.Builder modifyTableMsg =
         MasterProcedureProtos.ModifyTableStateData.newBuilder()
-            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(user))
+            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
             .setModifiedTableSchema(ProtobufUtil.convertToTableSchema(modifiedHTableDescriptor))
             .setDeleteColumnFamilyInModify(deleteColumnFamilyInModify);
 
@@ -249,7 +205,7 @@ public class ModifyTableProcedure
 
     MasterProcedureProtos.ModifyTableStateData modifyTableMsg =
         MasterProcedureProtos.ModifyTableStateData.parseDelimitedFrom(stream);
-    user = MasterProcedureUtil.toUserInfo(modifyTableMsg.getUserInfo());
+    setUser(MasterProcedureUtil.toUserInfo(modifyTableMsg.getUserInfo()));
     modifiedHTableDescriptor = ProtobufUtil.convertToHTableDesc(modifyTableMsg.getModifiedTableSchema());
     deleteColumnFamilyInModify = modifyTableMsg.getDeleteColumnFamilyInModify();
 
@@ -257,14 +213,6 @@ public class ModifyTableProcedure
       unmodifiedHTableDescriptor =
           ProtobufUtil.convertToHTableDesc(modifyTableMsg.getUnmodifiedTableSchema());
     }
-  }
-
-  @Override
-  public void toStringClassDetails(StringBuilder sb) {
-    sb.append(getClass().getSimpleName());
-    sb.append(" (table=");
-    sb.append(getTableName());
-    sb.append(")");
   }
 
   @Override
@@ -467,41 +415,17 @@ public class ModifyTableProcedure
       throws IOException, InterruptedException {
     final MasterCoprocessorHost cpHost = env.getMasterCoprocessorHost();
     if (cpHost != null) {
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          switch (state) {
-          case MODIFY_TABLE_PRE_OPERATION:
-            cpHost.preModifyTableAction(getTableName(), modifiedHTableDescriptor);
-            break;
-          case MODIFY_TABLE_POST_OPERATION:
-            cpHost.postCompletedModifyTableAction(getTableName(), modifiedHTableDescriptor);
-            break;
-          default:
-            throw new UnsupportedOperationException(this + " unhandled state=" + state);
-          }
-          return null;
-        }
-      });
-    }
-  }
-
-  /*
-   * Check whether we are in the state that can be rollback
-   */
-  private boolean isRollbackSupported(final ModifyTableState state) {
-    if (deleteColumnFamilyInModify) {
       switch (state) {
-      case MODIFY_TABLE_DELETE_FS_LAYOUT:
-      case MODIFY_TABLE_POST_OPERATION:
-      case MODIFY_TABLE_REOPEN_ALL_REGIONS:
-        // It is not safe to rollback if we reach to these states.
-        return false;
-      default:
-        break;
+        case MODIFY_TABLE_PRE_OPERATION:
+          cpHost.preModifyTableAction(getTableName(), modifiedHTableDescriptor, getUser());
+          break;
+        case MODIFY_TABLE_POST_OPERATION:
+          cpHost.postCompletedModifyTableAction(getTableName(), modifiedHTableDescriptor,getUser());
+          break;
+        default:
+          throw new UnsupportedOperationException(this + " unhandled state=" + state);
       }
     }
-    return true;
   }
 
   private List<HRegionInfo> getRegionInfoList(final MasterProcedureEnv env) throws IOException {

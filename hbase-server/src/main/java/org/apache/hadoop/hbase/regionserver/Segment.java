@@ -21,15 +21,18 @@ package org.apache.hadoop.hbase.regionserver;
 import java.util.Iterator;
 import java.util.SortedSet;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.util.ByteRange;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.ClassSize;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -43,31 +46,40 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceAudience.Private
 public abstract class Segment {
 
-  private volatile CellSet cellSet;
+  final static long FIXED_OVERHEAD = ClassSize.align(ClassSize.OBJECT
+      + 5 * ClassSize.REFERENCE // cellSet, comparator, memStoreLAB, size, timeRangeTracker
+      + Bytes.SIZEOF_LONG // minSequenceId
+      + Bytes.SIZEOF_BOOLEAN); // tagsPresent
+  public final static long DEEP_OVERHEAD = FIXED_OVERHEAD + ClassSize.ATOMIC_REFERENCE
+      + ClassSize.CELL_SET + ClassSize.ATOMIC_LONG + ClassSize.TIMERANGE_TRACKER;
+
+  private AtomicReference<CellSet> cellSet= new AtomicReference<CellSet>();
   private final CellComparator comparator;
   private long minSequenceId;
-  private volatile MemStoreLAB memStoreLAB;
+  private MemStoreLAB memStoreLAB;
+  // Sum of sizes of all Cells added to this Segment. Cell's heapSize is considered. This is not
+  // including the heap overhead of this class.
   protected final AtomicLong size;
+  protected final TimeRangeTracker timeRangeTracker;
   protected volatile boolean tagsPresent;
-  private final TimeRangeTracker timeRangeTracker;
 
-  protected Segment(CellSet cellSet, CellComparator comparator, MemStoreLAB memStoreLAB,
-      long size) {
-    this.cellSet = cellSet;
+  // This constructor is used to create empty Segments.
+  protected Segment(CellSet cellSet, CellComparator comparator, MemStoreLAB memStoreLAB) {
+    this.cellSet.set(cellSet);
     this.comparator = comparator;
     this.minSequenceId = Long.MAX_VALUE;
     this.memStoreLAB = memStoreLAB;
-    this.size = new AtomicLong(size);
+    this.size = new AtomicLong(0);
     this.tagsPresent = false;
     this.timeRangeTracker = new TimeRangeTracker();
   }
 
   protected Segment(Segment segment) {
-    this.cellSet = segment.getCellSet();
+    this.cellSet.set(segment.getCellSet());
     this.comparator = segment.getComparator();
     this.minSequenceId = segment.getMinSequenceId();
     this.memStoreLAB = segment.getMemStoreLAB();
-    this.size = new AtomicLong(segment.getSize());
+    this.size = new AtomicLong(segment.keySize());
     this.tagsPresent = segment.isTagsPresent();
     this.timeRangeTracker = segment.getTimeRangeTracker();
   }
@@ -76,7 +88,7 @@ public abstract class Segment {
    * Creates the scanner for the given read point
    * @return a scanner for the given read point
    */
-  public SegmentScanner getSegmentScanner(long readPoint) {
+  public SegmentScanner getScanner(long readPoint) {
     return new SegmentScanner(this, readPoint);
   }
 
@@ -84,12 +96,11 @@ public abstract class Segment {
    * Creates the scanner for the given read point, and a specific order in a list
    * @return a scanner for the given read point
    */
-  public SegmentScanner getSegmentScanner(long readPoint, long order) {
+  public SegmentScanner getScanner(long readPoint, long order) {
     return new SegmentScanner(this, readPoint, order);
   }
 
   /**
-   * Returns whether the segment has any cells
    * @return whether the segment has any cells
    */
   public boolean isEmpty() {
@@ -97,7 +108,6 @@ public abstract class Segment {
   }
 
   /**
-   * Returns number of cells in segment
    * @return number of cells in segment
    */
   public int getCellsCount() {
@@ -105,7 +115,6 @@ public abstract class Segment {
   }
 
   /**
-   * Returns the first cell in the segment that has equal or greater key than the given cell
    * @return the first cell in the segment that has equal or greater key than the given cell
    */
   public Cell getFirstAfter(Cell cell) {
@@ -120,9 +129,8 @@ public abstract class Segment {
    * Closing a segment before it is being discarded
    */
   public void close() {
-    MemStoreLAB mslab = getMemStoreLAB();
-    if(mslab != null) {
-      mslab.close();
+    if (this.memStoreLAB != null) {
+      this.memStoreLAB.close();
     }
     // do not set MSLab to null as scanners may still be reading the data here and need to decrease
     // the counter when they finish
@@ -134,22 +142,12 @@ public abstract class Segment {
    * @return either the given cell or its clone
    */
   public Cell maybeCloneWithAllocator(Cell cell) {
-    if (getMemStoreLAB() == null) {
+    if (this.memStoreLAB == null) {
       return cell;
     }
 
-    int len = getCellLength(cell);
-    ByteRange alloc = getMemStoreLAB().allocateBytes(len);
-    if (alloc == null) {
-      // The allocation was too large, allocator decided
-      // not to do anything with it.
-      return cell;
-    }
-    assert alloc.getBytes() != null;
-    KeyValueUtil.appendToByteArray(cell, alloc.getBytes(), alloc.getOffset());
-    KeyValue newKv = new KeyValue(alloc.getBytes(), alloc.getOffset(), len);
-    newKv.setSequenceId(cell.getSequenceId());
-    return newKv;
+    Cell cellFromMslab = this.memStoreLAB.copyCellInto(cell);
+    return (cellFromMslab != null) ? cellFromMslab : cell;
   }
 
   /**
@@ -169,40 +167,45 @@ public abstract class Segment {
   }
 
   public void incScannerCount() {
-    if(getMemStoreLAB() != null) {
-      getMemStoreLAB().incScannerCount();
+    if (this.memStoreLAB != null) {
+      this.memStoreLAB.incScannerCount();
     }
   }
 
   public void decScannerCount() {
-    if(getMemStoreLAB() != null) {
-      getMemStoreLAB().decScannerCount();
+    if (this.memStoreLAB != null) {
+      this.memStoreLAB.decScannerCount();
     }
   }
 
   /**
-   * Setting the heap size of the segment - used to account for different class overheads
+   * Setting the CellSet of the segment - used only for flat immutable segment for setting
+   * immutable CellSet after its creation in immutable segment constructor
    * @return this object
    */
 
-  public Segment setSize(long size) {
-    this.size.set(size);
+  protected Segment setCellSet(CellSet cellSetOld, CellSet cellSetNew) {
+    this.cellSet.compareAndSet(cellSetOld, cellSetNew);
     return this;
   }
 
   /**
-   * Returns the heap size of the segment
-   * @return the heap size of the segment
+   * @return Sum of all cell's size.
    */
-  public long getSize() {
-    return size.get();
+  public long keySize() {
+    return this.size.get();
   }
 
   /**
-   * Increases the heap size counter of the segment by the given delta
+   * @return the heap size of the segment
+   */
+  public abstract long size();
+
+  /**
+   * Updates the heap size counter of the segment by the given delta
    */
   public void incSize(long delta) {
-    size.addAndGet(delta);
+    this.size.addAndGet(delta);
   }
 
   public long getMinSequenceId() {
@@ -235,11 +238,10 @@ public abstract class Segment {
   }
 
   /**
-   * Returns a set of all cells in the segment
    * @return a set of all cells in the segment
    */
   protected CellSet getCellSet() {
-    return cellSet;
+    return cellSet.get();
   }
 
   /**
@@ -252,28 +254,34 @@ public abstract class Segment {
 
   protected long internalAdd(Cell cell, boolean mslabUsed) {
     boolean succ = getCellSet().add(cell);
-    long s = AbstractMemStore.heapSizeChange(cell, succ);
+    long s = updateMetaInfo(cell, succ, mslabUsed);
+    return s;
+  }
+
+  protected long updateMetaInfo(Cell cellToAdd, boolean succ, boolean mslabUsed) {
+    long s = heapSizeChange(cellToAdd, succ);
     // If there's already a same cell in the CellSet and we are using MSLAB, we must count in the
     // MSLAB allocation size as well, or else there will be memory leak (occupied heap size larger
     // than the counted number)
     if (!succ && mslabUsed) {
-      s += getCellLength(cell);
+      s += getCellLength(cellToAdd);
     }
-    updateMetaInfo(cell, s);
-    return s;
-  }
-
-  protected void updateMetaInfo(Cell toAdd, long s) {
-    getTimeRangeTracker().includeTimestamp(toAdd);
-    size.addAndGet(s);
-    minSequenceId = Math.min(minSequenceId, toAdd.getSequenceId());
+    getTimeRangeTracker().includeTimestamp(cellToAdd);
+    incSize(s);
+    minSequenceId = Math.min(minSequenceId, cellToAdd.getSequenceId());
     // In no tags case this NoTagsKeyValue.getTagsLength() is a cheap call.
     // When we use ACL CP or Visibility CP which deals with Tags during
     // mutation, the TagRewriteCell.getTagsLength() is a cheaper call. We do not
     // parse the byte[] to identify the tags length.
-    if(toAdd.getTagsLength() > 0) {
+    if( cellToAdd.getTagsLength() > 0) {
       tagsPresent = true;
     }
+    return s;
+  }
+
+  protected long heapSizeChange(Cell cell, boolean succ) {
+    return succ ? ClassSize
+        .align(ClassSize.CONCURRENT_SKIPLISTMAP_ENTRY + CellUtil.estimatedHeapSizeOf(cell)) : 0;
   }
 
   /**
@@ -286,7 +294,7 @@ public abstract class Segment {
   }
 
   @VisibleForTesting
-  public MemStoreLAB getMemStoreLAB() {
+  MemStoreLAB getMemStoreLAB() {
     return memStoreLAB;
   }
 
@@ -305,7 +313,8 @@ public abstract class Segment {
     String res = "Store segment of type "+this.getClass().getName()+"; ";
     res += "isEmpty "+(isEmpty()?"yes":"no")+"; ";
     res += "cellCount "+getCellsCount()+"; ";
-    res += "size "+getSize()+"; ";
+    res += "cellsSize "+keySize()+"; ";
+    res += "heapSize "+size()+"; ";
     res += "Min ts "+getMinTimestamp()+"; ";
     return res;
   }

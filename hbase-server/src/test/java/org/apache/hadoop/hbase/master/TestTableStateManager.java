@@ -24,8 +24,8 @@ import java.io.IOException;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.TableState;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
@@ -68,7 +68,7 @@ public class TestTableStateManager {
   private void setTableStateInZK(ZooKeeperWatcher watcher, final TableName tableName,
       final ZooKeeperProtos.DeprecatedTableState.State state)
       throws KeeperException, IOException {
-    String znode = ZKUtil.joinZNode(watcher.tableZNode, tableName.getNameAsString());
+    String znode = ZKUtil.joinZNode(watcher.znodePaths.tableZNode, tableName.getNameAsString());
     if (ZKUtil.checkExists(watcher, znode) == -1) {
       ZKUtil.createAndFailSilent(watcher, znode);
     }

@@ -36,6 +36,7 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.CellComparator.MetaCellComparator;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.io.compress.Compression;
@@ -287,6 +288,8 @@ public class HFileWriterImpl implements HFile.Writer {
         cacheIndexesOnWrite ? name : null);
     dataBlockIndexWriter.setMaxChunkSize(
         HFileBlockIndex.getMaxChunkSize(conf));
+    dataBlockIndexWriter.setMinIndexNumEntries(
+        HFileBlockIndex.getMinIndexNumEntries(conf));
     inlineBlockWriters.add(dataBlockIndexWriter);
 
     // Meta data block index writer
@@ -327,13 +330,13 @@ public class HFileWriterImpl implements HFile.Writer {
       doCacheOnWrite(lastDataBlockOffset);
     }
   }
-  
+
   /**
    * Try to return a Cell that falls between <code>left</code> and
    * <code>right</code> but that is shorter; i.e. takes up less space. This
    * trick is used building HFile block index. Its an optimization. It does not
    * always work. In this case we'll just return the <code>right</code> cell.
-   * 
+   *
    * @param comparator
    *          Comparator to use.
    * @param left
@@ -696,6 +699,20 @@ public class HFileWriterImpl implements HFile.Writer {
     int tagsLength = cell.getTagsLength();
     if (tagsLength > this.maxTagsLength) {
       this.maxTagsLength = tagsLength;
+    }
+  }
+
+  @Override
+  public void beforeShipped() throws IOException {
+    // Add clone methods for every cell
+    if (this.lastCell != null) {
+      this.lastCell = KeyValueUtil.toNewKeyCell(this.lastCell);
+    }
+    if (this.firstCellInBlock != null) {
+      this.firstCellInBlock = KeyValueUtil.toNewKeyCell(this.firstCellInBlock);
+    }
+    if (this.lastCellOfPreviousBlock != null) {
+      this.lastCellOfPreviousBlock = KeyValueUtil.toNewKeyCell(this.lastCellOfPreviousBlock);
     }
   }
 

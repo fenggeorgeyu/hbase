@@ -40,12 +40,12 @@ import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.snapshot.DisabledTableSnapshotHandler;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotHFileCleaner;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotManager;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.DeleteSnapshotRequest;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetCompletedSnapshotsRequest;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetCompletedSnapshotsResponse;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsSnapshotDoneRequest;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsSnapshotDoneResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.DeleteSnapshotRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.GetCompletedSnapshotsRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.GetCompletedSnapshotsResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.IsSnapshotDoneRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.IsSnapshotDoneResponse;
 import org.apache.hadoop.hbase.regionserver.CompactedHFilesDischarger;
 import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
 import org.apache.hadoop.hbase.regionserver.HRegion;
@@ -69,7 +69,6 @@ import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
 
 import com.google.common.collect.Lists;
-import com.google.protobuf.ServiceException;
 
 /**
  * Test the master-related aspects of a snapshot
@@ -91,6 +90,7 @@ public class TestSnapshotFromMaster {
       TableName.valueOf("test");
   // refresh the cache every 1/2 second
   private static final long cacheRefreshPeriod = 500;
+  private static final int blockingStoreFiles = 12;
 
   /**
    * Setup the config for the cluster
@@ -115,7 +115,7 @@ public class TestSnapshotFromMaster {
     conf.setInt("hbase.hstore.compaction.min", 2);
     conf.setInt("hbase.hstore.compactionThreshold", 5);
     // block writes if we get to 12 store files
-    conf.setInt("hbase.hstore.blockingStoreFiles", 12);
+    conf.setInt("hbase.hstore.blockingStoreFiles", blockingStoreFiles);
     // Ensure no extra cleaners on by default (e.g. TimeToLiveHFileCleaner)
     conf.set(HFileCleaner.MASTER_HFILE_CLEANER_PLUGINS, "");
     conf.set(HConstants.HBASE_MASTER_LOGCLEANER_PLUGINS, "");
@@ -261,8 +261,8 @@ public class TestSnapshotFromMaster {
     try {
       master.getMasterRpcServices().deleteSnapshot(null, request);
       fail("Master didn't throw exception when attempting to delete snapshot that doesn't exist");
-    } catch (ServiceException e) {
-      LOG.debug("Correctly failed delete of non-existant snapshot:" + e.getMessage());
+    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException e) {
+      // Expected
     }
 
     // write one snapshot to the fs
@@ -278,21 +278,8 @@ public class TestSnapshotFromMaster {
    * should be retained, while those that are not in a snapshot should be deleted.
    * @throws Exception on failure
    */
-  @Test(timeout = 600000)
+  @Test(timeout = 300000)
   public void testSnapshotHFileArchiving() throws Exception {
-    int[] hfileCount = new int[]{10, 15, 20};
-    for (int count : hfileCount) {
-      LOG.info("testSnapshotHFileArchiving with " + count + " hfiles");
-      testSnapshotHFileArchiving(count);
-    }
-  }
-
-  /**
-   * It will put data and flush until there are enough hfiles.
-   * @param hfileCount
-   * @throws Exception
-   */
-  private void testSnapshotHFileArchiving(int hfileCount) throws Exception {
     Admin admin = UTIL.getHBaseAdmin();
     // make sure we don't fail on listing snapshots
     SnapshotTestingUtils.assertNoSnapshots(admin);
@@ -305,13 +292,9 @@ public class TestSnapshotFromMaster {
     UTIL.createTable(htd, new byte[][] { TEST_FAM }, null);
 
     // load the table
-    while(true) {
+    for (int i = 0; i < blockingStoreFiles / 2; i ++) {
       UTIL.loadTable(UTIL.getConnection().getTable(TABLE_NAME), TEST_FAM);
       UTIL.flush(TABLE_NAME);
-      Collection<String> hfiles = getHFiles(rootDir, fs, TABLE_NAME);
-      if (hfiles.size() >= hfileCount) {
-        break;
-      }
     }
 
     // disable the table so we can take a snapshot
@@ -412,8 +395,8 @@ public class TestSnapshotFromMaster {
    * @throws IOException on expected failure
    */
   private final Collection<String> getHFiles(Path dir, FileSystem fs, TableName tableName) throws IOException {
-    Path tableArchive = FSUtils.getTableDir(dir, tableName);
-    return SnapshotTestingUtils.listHFileNames(fs, tableArchive);
+    Path tableDir = FSUtils.getTableDir(dir, tableName);
+    return SnapshotTestingUtils.listHFileNames(fs, tableDir);
   }
 
   /**

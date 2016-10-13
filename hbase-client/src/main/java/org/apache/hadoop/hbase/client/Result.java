@@ -40,7 +40,7 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -275,12 +275,24 @@ public class Result implements CellScannable, CellScanner {
     return result;
   }
 
+  private byte[] notNullBytes(final byte[] bytes) {
+    if (bytes == null) {
+      return HConstants.EMPTY_BYTE_ARRAY;
+    } else {
+      return bytes;
+    }
+  }
+
   protected int binarySearch(final Cell [] kvs,
                              final byte [] family,
                              final byte [] qualifier) {
+    byte[] familyNotNull = notNullBytes(family);
+    byte[] qualifierNotNull = notNullBytes(qualifier);
     Cell searchTerm =
-        KeyValueUtil.createFirstOnRow(CellUtil.cloneRow(kvs[0]),
-            family, qualifier);
+        CellUtil.createFirstOnRow(kvs[0].getRowArray(),
+            kvs[0].getRowOffset(), kvs[0].getRowLength(),
+            familyNotNull, 0, (byte)familyNotNull.length,
+            qualifierNotNull, 0, qualifierNotNull.length);
 
     // pos === ( -(insertion point) - 1)
     int pos = Arrays.binarySearch(kvs, searchTerm, CellComparator.COMPARATOR);
@@ -773,7 +785,7 @@ public class Result implements CellScannable, CellScanner {
     Cell[] replicatedKVs = res2.rawCells();
     for (int i = 0; i < res1.size(); i++) {
       if (!ourKVs[i].equals(replicatedKVs[i]) ||
-          !Bytes.equals(CellUtil.cloneValue(ourKVs[i]), CellUtil.cloneValue(replicatedKVs[i]))) {
+          !CellUtil.matchingValue(ourKVs[i], replicatedKVs[i])) {
         throw new Exception("This result was different: "
             + res1.toString() + " compared to " + res2.toString());
       }

@@ -18,7 +18,9 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import com.google.common.base.Preconditions;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -29,38 +31,35 @@ import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
-import org.apache.hadoop.hbase.regionserver.compactions.Compactor;
+import org.apache.hadoop.hbase.util.BloomContext;
 import org.apache.hadoop.hbase.util.BloomFilterFactory;
 import org.apache.hadoop.hbase.util.BloomFilterWriter;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.RowBloomContext;
+import org.apache.hadoop.hbase.util.RowColBloomContext;
 import org.apache.hadoop.io.WritableUtils;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.util.Arrays;
+import com.google.common.base.Preconditions;
 
 /**
  * A StoreFile writer.  Use this to read/write HBase Store Files. It is package
  * local because it is an implementation detail of the HBase regionserver.
  */
 @InterfaceAudience.Private
-public class StoreFileWriter implements Compactor.CellSink {
+public class StoreFileWriter implements CellSink, ShipperListener {
   private static final Log LOG = LogFactory.getLog(StoreFileWriter.class.getName());
 
   private final BloomFilterWriter generalBloomFilterWriter;
   private final BloomFilterWriter deleteFamilyBloomFilterWriter;
   private final BloomType bloomType;
-  private byte[] lastBloomKey;
-  private int lastBloomKeyOffset, lastBloomKeyLen;
-  private Cell lastCell = null;
   private long earliestPutTs = HConstants.LATEST_TIMESTAMP;
-  private Cell lastDeleteFamilyCell = null;
   private long deleteFamilyCnt = 0;
+  private BloomContext bloomContext = null;
+  private BloomContext deleteFamilyBloomContext = null;
 
   /**
    * timeRangeTrackerSet is used to figure if we were passed a filled-out TimeRangeTracker or not.
@@ -73,7 +72,6 @@ public class StoreFileWriter implements Compactor.CellSink {
    final TimeRangeTracker timeRangeTracker;
 
   protected HFile.Writer writer;
-  private KeyValue.KeyOnlyKeyValue lastBloomKeyOnlyKV = null;
 
   /**
    * Creates an HFile.Writer that also write helpful meta data.
@@ -121,6 +119,7 @@ public class StoreFileWriter implements Compactor.CellSink {
     // it no longer writable.
     this.timeRangeTrackerSet = trt != null;
     this.timeRangeTracker = this.timeRangeTrackerSet? trt: new TimeRangeTracker();
+    // TODO : Change all writers to be specifically created for compaction context
     writer = HFile.getWriterFactory(conf, cacheConf)
         .withPath(fs, path)
         .withComparator(comparator)
@@ -134,12 +133,21 @@ public class StoreFileWriter implements Compactor.CellSink {
 
     if (generalBloomFilterWriter != null) {
       this.bloomType = bloomType;
-      if(this.bloomType ==  BloomType.ROWCOL) {
-        lastBloomKeyOnlyKV = new KeyValue.KeyOnlyKeyValue();
-      }
       if (LOG.isTraceEnabled()) {
         LOG.trace("Bloom filter type for " + path + ": " + this.bloomType + ", " +
             generalBloomFilterWriter.getClass().getSimpleName());
+      }
+      // init bloom context
+      switch (bloomType) {
+      case ROW:
+        bloomContext = new RowBloomContext(generalBloomFilterWriter, comparator);
+        break;
+      case ROWCOL:
+        bloomContext = new RowColBloomContext(generalBloomFilterWriter, comparator);
+        break;
+      default:
+        throw new IOException(
+            "Invalid Bloom filter type: " + bloomType + " (ROW or ROWCOL expected)");
       }
     } else {
       // Not using Bloom filters.
@@ -152,6 +160,7 @@ public class StoreFileWriter implements Compactor.CellSink {
       this.deleteFamilyBloomFilterWriter = BloomFilterFactory
           .createDeleteBloomAtWrite(conf, cacheConf,
               (int) Math.min(maxKeys, Integer.MAX_VALUE), writer);
+      deleteFamilyBloomContext = new RowBloomContext(deleteFamilyBloomFilterWriter, comparator);
     } else {
       deleteFamilyBloomFilterWriter = null;
     }
@@ -217,88 +226,15 @@ public class StoreFileWriter implements Compactor.CellSink {
 
   private void appendGeneralBloomfilter(final Cell cell) throws IOException {
     if (this.generalBloomFilterWriter != null) {
-      // only add to the bloom filter on a new, unique key
-      boolean newKey = true;
-      if (this.lastCell != null) {
-        switch(bloomType) {
-          case ROW:
-            newKey = ! CellUtil.matchingRows(cell, lastCell);
-            break;
-          case ROWCOL:
-            newKey = ! CellUtil.matchingRowColumn(cell, lastCell);
-            break;
-          case NONE:
-            newKey = false;
-            break;
-          default:
-            throw new IOException("Invalid Bloom filter type: " + bloomType +
-                " (ROW or ROWCOL expected)");
-        }
-      }
-      if (newKey) {
-        /*
-         * http://2.bp.blogspot.com/_Cib_A77V54U/StZMrzaKufI/AAAAAAAAADo/ZhK7bGoJdMQ/s400/KeyValue.png
-         * Key = RowLen + Row + FamilyLen + Column [Family + Qualifier] + TimeStamp
-         *
-         * 2 Types of Filtering:
-         *  1. Row = Row
-         *  2. RowCol = Row + Qualifier
-         */
-        byte[] bloomKey = null;
-        // Used with ROW_COL bloom
-        KeyValue bloomKeyKV = null;
-        int bloomKeyOffset, bloomKeyLen;
-
-        switch (bloomType) {
-          case ROW:
-            bloomKey = cell.getRowArray();
-            bloomKeyOffset = cell.getRowOffset();
-            bloomKeyLen = cell.getRowLength();
-            break;
-          case ROWCOL:
-            // merge(row, qualifier)
-            // TODO: could save one buffer copy in case of compound Bloom
-            // filters when this involves creating a KeyValue
-            // TODO : Handle while writes also
-            bloomKeyKV = KeyValueUtil.createFirstOnRow(cell.getRowArray(), cell.getRowOffset(),
-                cell.getRowLength(),
-                HConstants.EMPTY_BYTE_ARRAY, 0, 0, cell.getQualifierArray(),
-                cell.getQualifierOffset(),
-                cell.getQualifierLength());
-            bloomKey = bloomKeyKV.getBuffer();
-            bloomKeyOffset = bloomKeyKV.getKeyOffset();
-            bloomKeyLen = bloomKeyKV.getKeyLength();
-            break;
-          default:
-            throw new IOException("Invalid Bloom filter type: " + bloomType +
-                " (ROW or ROWCOL expected)");
-        }
-        generalBloomFilterWriter.add(bloomKey, bloomKeyOffset, bloomKeyLen);
-        if (lastBloomKey != null) {
-          int res = 0;
-          // hbase:meta does not have blooms. So we need not have special interpretation
-          // of the hbase:meta cells.  We can safely use Bytes.BYTES_RAWCOMPARATOR for ROW Bloom
-          if (bloomType == BloomType.ROW) {
-            res = Bytes.BYTES_RAWCOMPARATOR.compare(bloomKey, bloomKeyOffset, bloomKeyLen,
-                lastBloomKey, lastBloomKeyOffset, lastBloomKeyLen);
-          } else {
-            // TODO : Caching of kv components becomes important in these cases
-            res = CellComparator.COMPARATOR.compare(bloomKeyKV, lastBloomKeyOnlyKV);
-          }
-          if (res <= 0) {
-            throw new IOException("Non-increasing Bloom keys: "
-                + Bytes.toStringBinary(bloomKey, bloomKeyOffset, bloomKeyLen) + " after "
-                + Bytes.toStringBinary(lastBloomKey, lastBloomKeyOffset, lastBloomKeyLen));
-          }
-        }
-        lastBloomKey = bloomKey;
-        lastBloomKeyOffset = bloomKeyOffset;
-        lastBloomKeyLen = bloomKeyLen;
-        if (bloomType == BloomType.ROWCOL) {
-          lastBloomKeyOnlyKV.setKey(bloomKey, bloomKeyOffset, bloomKeyLen);
-        }
-        this.lastCell = cell;
-      }
+      /*
+       * http://2.bp.blogspot.com/_Cib_A77V54U/StZMrzaKufI/AAAAAAAAADo/ZhK7bGoJdMQ/s400/KeyValue.png
+       * Key = RowLen + Row + FamilyLen + Column [Family + Qualifier] + TimeStamp
+       *
+       * 2 Types of Filtering:
+       *  1. Row = Row
+       *  2. RowCol = Row + Qualifier
+       */
+      bloomContext.writeBloom(cell);
     }
   }
 
@@ -310,26 +246,30 @@ public class StoreFileWriter implements Compactor.CellSink {
 
     // increase the number of delete family in the store file
     deleteFamilyCnt++;
-    if (null != this.deleteFamilyBloomFilterWriter) {
-      boolean newKey = true;
-      if (lastDeleteFamilyCell != null) {
-        // hbase:meta does not have blooms. So we need not have special interpretation
-        // of the hbase:meta cells
-        newKey = !CellUtil.matchingRows(cell, lastDeleteFamilyCell);
-      }
-      if (newKey) {
-        this.deleteFamilyBloomFilterWriter.add(cell.getRowArray(),
-            cell.getRowOffset(), cell.getRowLength());
-        this.lastDeleteFamilyCell = cell;
-      }
+    if (this.deleteFamilyBloomFilterWriter != null) {
+      deleteFamilyBloomContext.writeBloom(cell);
     }
   }
 
+  @Override
   public void append(final Cell cell) throws IOException {
     appendGeneralBloomfilter(cell);
     appendDeleteFamilyBloomFilter(cell);
     writer.append(cell);
     trackTimestamps(cell);
+  }
+
+  @Override
+  public void beforeShipped() throws IOException {
+    // For now these writer will always be of type ShipperListener true.
+    // TODO : Change all writers to be specifically created for compaction context
+    writer.beforeShipped();
+    if (generalBloomFilterWriter != null) {
+      generalBloomFilterWriter.beforeShipped();
+    }
+    if (deleteFamilyBloomFilterWriter != null) {
+      deleteFamilyBloomFilterWriter.beforeShipped();
+    }
   }
 
   public Path getPath() {
@@ -365,11 +305,7 @@ public class StoreFileWriter implements Compactor.CellSink {
       writer.addGeneralBloomFilter(generalBloomFilterWriter);
       writer.appendFileInfo(StoreFile.BLOOM_FILTER_TYPE_KEY,
           Bytes.toBytes(bloomType.toString()));
-      if (lastBloomKey != null) {
-        writer.appendFileInfo(StoreFile.LAST_BLOOM_KEY, Arrays.copyOfRange(
-            lastBloomKey, lastBloomKeyOffset, lastBloomKeyOffset
-                + lastBloomKeyLen));
-      }
+      bloomContext.addLastBloomKey(writer);
     }
     return hasGeneralBloom;
   }

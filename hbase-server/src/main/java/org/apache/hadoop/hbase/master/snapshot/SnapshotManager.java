@@ -64,11 +64,11 @@ import org.apache.hadoop.hbase.procedure.ProcedureCoordinator;
 import org.apache.hadoop.hbase.procedure.ProcedureCoordinatorRpcs;
 import org.apache.hadoop.hbase.procedure.ZKProcedureCoordinatorRpcs;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.NameStringPair;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.ProcedureDescription;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription.Type;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.NameStringPair;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.ProcedureDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription.Type;
 import org.apache.hadoop.hbase.security.AccessDeniedException;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
@@ -84,6 +84,7 @@ import org.apache.hadoop.hbase.snapshot.TablePartiallyOpenException;
 import org.apache.hadoop.hbase.snapshot.UnknownSnapshotException;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.KeyLocker;
 import org.apache.zookeeper.KeeperException;
 
 /**
@@ -159,6 +160,16 @@ public class SnapshotManager extends MasterProcedureManager implements Stoppable
 
   private Path rootDir;
   private ExecutorService executorService;
+
+  /**
+   *  Locks for snapshot operations
+   *  key is snapshot's filename in progress, value is the related lock
+   *    - create snapshot
+   *    - SnapshotCleaner
+   * */
+  private KeyLocker<String> locks = new KeyLocker<String>();
+
+
 
   public SnapshotManager() {}
 
@@ -471,7 +482,7 @@ public class SnapshotManager extends MasterProcedureManager implements Stoppable
 
     // Take the snapshot of the disabled table
     DisabledTableSnapshotHandler handler =
-        new DisabledTableSnapshotHandler(snapshot, master);
+        new DisabledTableSnapshotHandler(snapshot, master, this);
     snapshotTable(snapshot, handler);
   }
 
@@ -1172,4 +1183,9 @@ public class SnapshotManager extends MasterProcedureManager implements Stoppable
     builder.setType(SnapshotDescription.Type.FLUSH);
     return builder.build();
   }
+
+  public KeyLocker<String> getLocks() {
+    return locks;
+  }
+
 }

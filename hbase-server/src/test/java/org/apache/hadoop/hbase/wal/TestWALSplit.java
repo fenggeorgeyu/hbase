@@ -61,9 +61,9 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.wal.FaultySequenceFileLogReader;
 import org.apache.hadoop.hbase.regionserver.wal.InstrumentedLogWriter;
@@ -151,8 +151,6 @@ public class TestWALSplit {
     conf = TEST_UTIL.getConfiguration();
     conf.setClass("hbase.regionserver.hlog.writer.impl",
         InstrumentedLogWriter.class, Writer.class);
-    conf.setBoolean("dfs.support.broken.append", true);
-    conf.setBoolean("dfs.support.append", true);
     // This is how you turn off shortcircuit read currently.  TODO: Fix.  Should read config.
     System.setProperty("hbase.tests.use.shortcircuit.reads", "false");
     // Create fake maping user to group and set it to the conf.
@@ -1078,8 +1076,7 @@ public class TestWALSplit {
     useDifferentDFSClient();
     WALSplitter.split(HBASEDIR, WALDIR, OLDLOGDIR, fs, conf, wals);
 
-    final Path corruptDir = new Path(FSUtils.getRootDir(conf), conf.get(
-        "hbase.regionserver.hlog.splitlog.corrupt.dir", HConstants.CORRUPT_DIR_NAME));
+    final Path corruptDir = new Path(FSUtils.getRootDir(conf), HConstants.CORRUPT_DIR_NAME);
     assertEquals(1, fs.listStatus(corruptDir).length);
   }
 

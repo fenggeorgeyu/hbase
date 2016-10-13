@@ -158,6 +158,8 @@ public class TestCacheOnWrite {
     // default
     blockcaches.add(new CacheConfig(conf).getBlockCache());
 
+    //set LruBlockCache.LRU_HARD_CAPACITY_LIMIT_FACTOR_CONFIG_NAME to 2.0f due to HBASE-16287
+    TEST_UTIL.getConfiguration().setFloat(LruBlockCache.LRU_HARD_CAPACITY_LIMIT_FACTOR_CONFIG_NAME, 2.0f);
     // memory
     BlockCache lru = new LruBlockCache(128 * 1024 * 1024, 64 * 1024, TEST_UTIL.getConfiguration());
     blockcaches.add(lru);
@@ -312,7 +314,7 @@ public class TestCacheOnWrite {
     String countByType = blockCountByType.toString();
     if (useTags) {
       assertEquals("{" + BlockType.DATA
-          + "=2663, LEAF_INDEX=297, BLOOM_CHUNK=9, INTERMEDIATE_INDEX=34}", countByType);
+          + "=2663, LEAF_INDEX=297, BLOOM_CHUNK=9, INTERMEDIATE_INDEX=32}", countByType);
     } else {
       assertEquals("{" + BlockType.DATA
           + "=2498, LEAF_INDEX=278, BLOOM_CHUNK=9, INTERMEDIATE_INDEX=31}", countByType);

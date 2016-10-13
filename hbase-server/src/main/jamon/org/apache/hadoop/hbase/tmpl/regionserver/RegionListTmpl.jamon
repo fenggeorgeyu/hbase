@@ -22,15 +22,16 @@
 </%args>
 <%import>
         java.util.*;
+        org.apache.commons.lang.time.FastDateFormat;
         org.apache.hadoop.hbase.regionserver.HRegionServer;
         org.apache.hadoop.hbase.util.Bytes;
         org.apache.hadoop.hbase.HRegionInfo;
         org.apache.hadoop.hbase.regionserver.Region;
         org.apache.hadoop.hbase.ServerName;
         org.apache.hadoop.hbase.HBaseConfiguration;
-        org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-        org.apache.hadoop.hbase.protobuf.generated.AdminProtos.ServerInfo;
-        org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionLoad;
+        org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+        org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ServerInfo;
+        org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionLoad;
         org.apache.hadoop.hbase.client.RegionReplicaUtil;
         org.apache.hadoop.hbase.regionserver.MetricsRegionWrapper;
         org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix;
@@ -197,6 +198,7 @@
             <th>Num. Compacting KVs</th>
             <th>Num. Compacted KVs</th>
             <th>Compaction Progress</th>
+            <th>Last Major Compaction</th>
         </tr>
 
         <%for HRegionInfo r: onlineRegions %>
@@ -205,9 +207,16 @@
         <%java>
             RegionLoad load = regionServer.createRegionLoad(r.getEncodedName());
             String percentDone = "";
-            if  (load != null && load.getTotalCompactingKVs() > 0) {
-            percentDone = String.format("%.2f", 100 *
-            ((float) load.getCurrentCompactedKVs() / load.getTotalCompactingKVs())) + "%";
+            String compactTime = "";
+            if  (load != null) {
+              if (load.getTotalCompactingKVs() > 0) {
+                percentDone = String.format("%.2f", 100 *
+                    ((float) load.getCurrentCompactedKVs() / load.getTotalCompactingKVs())) + "%";
+              }
+              if (load.getLastMajorCompactionTs() > 0) {
+                FastDateFormat fdf = FastDateFormat.getInstance("yyyy-MM-dd HH:mm ZZ");
+                compactTime = fdf.format(load.getLastMajorCompactionTs());
+              }
             }
             String displayName = HRegionInfo.getRegionNameAsStringForDisplay(r,
               regionServer.getConfiguration());
@@ -217,6 +226,7 @@
             <td><% load.getTotalCompactingKVs() %></td>
             <td><% load.getCurrentCompactedKVs() %></td>
             <td><% percentDone %></td>
+            <td><% compactTime %></td>
             </%if>
         </tr>
         </%for>

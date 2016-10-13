@@ -367,7 +367,8 @@ public class DiffKeyDeltaEncoder extends BufferedDataBlockEncoder {
     private int rowLengthWithSize;
     private long timestamp;
 
-    public DiffSeekerState(ObjectIntPair<ByteBuffer> tmpPair, boolean includeTags) {
+    public DiffSeekerState(ObjectIntPair<ByteBuffer> tmpPair,
+        boolean includeTags) {
       super(tmpPair, includeTags);
     }
 

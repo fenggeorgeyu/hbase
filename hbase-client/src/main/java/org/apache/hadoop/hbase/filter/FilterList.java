@@ -29,10 +29,9 @@ import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.FilterProtos;
-
-import com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.FilterProtos;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * Implementation of {@link Filter} that represents an ordered List of Filters
@@ -285,6 +284,7 @@ final public class FilterList extends Filter {
         }
       } else if (operator == Operator.MUST_PASS_ONE) {
         if (filter.filterAllRemaining()) {
+          seenNonHintReturnCode = true;
           continue;
         }
 
@@ -405,8 +405,7 @@ final public class FilterList extends Filter {
 
     List<Filter> rowFilters = new ArrayList<Filter>(proto.getFiltersCount());
     try {
-      List<org.apache.hadoop.hbase.protobuf.generated.FilterProtos.Filter> filtersList =
-          proto.getFiltersList();
+      List<FilterProtos.Filter> filtersList = proto.getFiltersList();
       int listSize = filtersList.size();
       for (int i = 0; i < listSize; i++) {
         rowFilters.add(ProtobufUtil.toFilter(filtersList.get(i)));

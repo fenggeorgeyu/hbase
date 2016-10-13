@@ -18,12 +18,12 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -38,12 +38,18 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.master.TableLockManager;
 import org.apache.hadoop.hbase.master.TableLockManager.TableLock;
 import org.apache.hadoop.hbase.master.procedure.TableProcedureInterface.TableOperationType;
+import org.apache.hadoop.hbase.procedure2.AbstractProcedureScheduler;
 import org.apache.hadoop.hbase.procedure2.Procedure;
-import org.apache.hadoop.hbase.procedure2.ProcedureRunnableSet;
+import org.apache.hadoop.hbase.procedure2.ProcedureEventQueue;
+import org.apache.hadoop.hbase.util.AvlUtil.AvlKeyComparator;
+import org.apache.hadoop.hbase.util.AvlUtil.AvlIterableList;
+import org.apache.hadoop.hbase.util.AvlUtil.AvlLinkedNode;
+import org.apache.hadoop.hbase.util.AvlUtil.AvlTree;
+import org.apache.hadoop.hbase.util.AvlUtil.AvlTreeIterator;
 
 /**
- * ProcedureRunnableSet for the Master Procedures.
- * This RunnableSet tries to provide to the ProcedureExecutor procedures
+ * ProcedureScheduler for the Master Procedures.
+ * This ProcedureScheduler tries to provide to the ProcedureExecutor procedures
  * that can be executed without having to wait on a lock.
  * Most of the master operations can be executed concurrently, if they
  * are operating on different tables (e.g. two create table can be performed
@@ -58,28 +64,28 @@ import org.apache.hadoop.hbase.procedure2.ProcedureRunnableSet;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public class MasterProcedureScheduler implements ProcedureRunnableSet {
+public class MasterProcedureScheduler extends AbstractProcedureScheduler {
   private static final Log LOG = LogFactory.getLog(MasterProcedureScheduler.class);
 
   private final TableLockManager lockManager;
-  private final ReentrantLock schedLock = new ReentrantLock();
-  private final Condition schedWaitCond = schedLock.newCondition();
+
+  private final static NamespaceQueueKeyComparator NAMESPACE_QUEUE_KEY_COMPARATOR =
+      new NamespaceQueueKeyComparator();
+  private final static ServerQueueKeyComparator SERVER_QUEUE_KEY_COMPARATOR =
+      new ServerQueueKeyComparator();
+  private final static TableQueueKeyComparator TABLE_QUEUE_KEY_COMPARATOR =
+      new TableQueueKeyComparator();
 
   private final FairQueue<ServerName> serverRunQueue = new FairQueue<ServerName>();
   private final FairQueue<TableName> tableRunQueue = new FairQueue<TableName>();
-  private int queueSize = 0;
 
-  private final Object[] serverBuckets = new Object[128];
-  private Queue<String> namespaceMap = null;
-  private Queue<TableName> tableMap = null;
+  private final ServerQueue[] serverBuckets = new ServerQueue[128];
+  private NamespaceQueue namespaceMap = null;
+  private TableQueue tableMap = null;
 
   private final int metaTablePriority;
   private final int userTablePriority;
   private final int sysTablePriority;
-
-  // TODO: metrics
-  private long pollCalls = 0;
-  private long nullPollCalls = 0;
 
   public MasterProcedureScheduler(final Configuration conf, final TableLockManager lockManager) {
     this.lockManager = lockManager;
@@ -91,44 +97,23 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   }
 
   @Override
-  public void addFront(Procedure proc) {
-    doAdd(proc, true);
-  }
-
-  @Override
-  public void addBack(Procedure proc) {
-    doAdd(proc, false);
-  }
-
-  @Override
   public void yield(final Procedure proc) {
-    doAdd(proc, isTableProcedure(proc));
+    push(proc, isTableProcedure(proc), true);
   }
 
-  private void doAdd(final Procedure proc, final boolean addFront) {
-    doAdd(proc, addFront, true);
-  }
-
-  private void doAdd(final Procedure proc, final boolean addFront, final boolean notify) {
-    schedLock.lock();
-    try {
-      if (isTableProcedure(proc)) {
-        doAdd(tableRunQueue, getTableQueue(getTableName(proc)), proc, addFront);
-      } else if (isServerProcedure(proc)) {
-        doAdd(serverRunQueue, getServerQueue(getServerName(proc)), proc, addFront);
-      } else {
-        // TODO: at the moment we only have Table and Server procedures
-        // if you are implementing a non-table/non-server procedure, you have two options: create
-        // a group for all the non-table/non-server procedures or try to find a key for your
-        // non-table/non-server procedures and implement something similar to the TableRunQueue.
-        throw new UnsupportedOperationException(
-          "RQs for non-table/non-server procedures are not implemented yet");
-      }
-      if (notify) {
-        schedWaitCond.signal();
-      }
-    } finally {
-      schedLock.unlock();
+  @Override
+  protected void enqueue(final Procedure proc, final boolean addFront) {
+    if (isTableProcedure(proc)) {
+      doAdd(tableRunQueue, getTableQueue(getTableName(proc)), proc, addFront);
+    } else if (isServerProcedure(proc)) {
+      doAdd(serverRunQueue, getServerQueue(getServerName(proc)), proc, addFront);
+    } else {
+      // TODO: at the moment we only have Table and Server procedures
+      // if you are implementing a non-table/non-server procedure, you have two options: create
+      // a group for all the non-table/non-server procedures or try to find a key for your
+      // non-table/non-server procedures and implement something similar to the TableRunQueue.
+      throw new UnsupportedOperationException(
+        "RQs for non-table/non-server procedures are not implemented yet: " + proc);
     }
   }
 
@@ -137,85 +122,60 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     if (proc.isSuspended()) return;
 
     queue.add(proc, addFront);
-
-    if (!(queue.isSuspended() || queue.hasExclusiveLock())) {
-      // the queue is not suspended or removed from the fairq (run-queue)
-      // because someone has an xlock on it.
-      // so, if the queue is not-linked we should add it
-      if (queue.size() == 1 && !IterableList.isLinked(queue)) {
-        fairq.add(queue);
-      }
-      queueSize++;
-    } else if (proc.hasParent() && queue.isLockOwner(proc.getParentProcId())) {
+    if (!queue.hasExclusiveLock() || queue.isLockOwner(proc.getProcId())) {
+      // if the queue was not remove for an xlock execution
+      // or the proc is the lock owner, put the queue back into execution
+      addToRunQueue(fairq, queue);
+    } else if (queue.hasParentLock(proc)) {
       assert addFront : "expected to add a child in the front";
       assert !queue.isSuspended() : "unexpected suspended state for the queue";
       // our (proc) parent has the xlock,
       // so the queue is not in the fairq (run-queue)
       // add it back to let the child run (inherit the lock)
-      if (!IterableList.isLinked(queue)) {
-        fairq.add(queue);
-      }
-      queueSize++;
+      addToRunQueue(fairq, queue);
     }
   }
 
   @Override
-  public Procedure poll() {
-    return poll(-1);
+  protected boolean queueHasRunnables() {
+    return tableRunQueue.hasRunnables() || serverRunQueue.hasRunnables();
   }
 
-  @edu.umd.cs.findbugs.annotations.SuppressWarnings("WA_AWAIT_NOT_IN_LOOP")
-  protected Procedure poll(long waitNsec) {
-    Procedure pollResult = null;
-    schedLock.lock();
-    try {
-      if (queueSize == 0) {
-        if (waitNsec < 0) {
-          schedWaitCond.await();
-        } else {
-          schedWaitCond.awaitNanos(waitNsec);
-        }
-        if (queueSize == 0) {
-          return null;
-        }
-      }
-
-      // For now, let server handling have precedence over table handling; presumption is that it
-      // is more important handling crashed servers than it is running the
-      // enabling/disabling tables, etc.
-      pollResult = doPoll(serverRunQueue);
-      if (pollResult == null) {
-        pollResult = doPoll(tableRunQueue);
-      }
-
-      // update metrics
-      pollCalls++;
-      nullPollCalls += (pollResult == null) ? 1 : 0;
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    } finally {
-      schedLock.unlock();
+  @Override
+  protected Procedure dequeue() {
+    // For now, let server handling have precedence over table handling; presumption is that it
+    // is more important handling crashed servers than it is running the
+    // enabling/disabling tables, etc.
+    Procedure pollResult = doPoll(serverRunQueue);
+    if (pollResult == null) {
+      pollResult = doPoll(tableRunQueue);
     }
     return pollResult;
   }
 
   private <T extends Comparable<T>> Procedure doPoll(final FairQueue<T> fairq) {
-    Queue<T> rq = fairq.poll();
+    final Queue<T> rq = fairq.poll();
     if (rq == null || !rq.isAvailable()) {
       return null;
     }
 
     assert !rq.isSuspended() : "rq=" + rq + " is suspended";
-    Procedure pollResult = rq.poll();
-    this.queueSize--;
-    if (rq.isEmpty() || rq.requireExclusiveLock(pollResult)) {
+    final Procedure pollResult = rq.peek();
+    final boolean xlockReq = rq.requireExclusiveLock(pollResult);
+    if (xlockReq && rq.isLocked() && !rq.hasLockAccess(pollResult)) {
+      // someone is already holding the lock (e.g. shared lock). avoid a yield
+      return null;
+    }
+
+    rq.poll();
+    if (rq.isEmpty() || xlockReq) {
       removeFromRunQueue(fairq, rq);
-    } else if (pollResult.hasParent() && rq.isLockOwner(pollResult.getParentProcId())) {
+    } else if (rq.hasParentLock(pollResult)) {
       // if the rq is in the fairq because of runnable child
       // check if the next procedure is still a child.
       // if not, remove the rq from the fairq and go back to the xlock state
       Procedure nextProc = rq.peek();
-      if (nextProc != null && nextProc.getParentProcId() != pollResult.getParentProcId()) {
+      if (nextProc != null && !Procedure.haveSameParent(nextProc, pollResult)) {
         removeFromRunQueue(fairq, rq);
       }
     }
@@ -224,62 +184,58 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   }
 
   @Override
-  public void clear() {
-    // NOTE: USED ONLY FOR TESTING
-    schedLock.lock();
-    try {
-      // Remove Servers
-      for (int i = 0; i < serverBuckets.length; ++i) {
-        clear((ServerQueue)serverBuckets[i], serverRunQueue);
-        serverBuckets[i] = null;
-      }
-
-      // Remove Tables
-      clear(tableMap, tableRunQueue);
-      tableMap = null;
-
-      assert queueSize == 0 : "expected queue size to be 0, got " + queueSize;
-    } finally {
-      schedLock.unlock();
+  public void clearQueue() {
+    // Remove Servers
+    for (int i = 0; i < serverBuckets.length; ++i) {
+      clear(serverBuckets[i], serverRunQueue, SERVER_QUEUE_KEY_COMPARATOR);
+      serverBuckets[i] = null;
     }
+
+    // Remove Tables
+    clear(tableMap, tableRunQueue, TABLE_QUEUE_KEY_COMPARATOR);
+    tableMap = null;
+
+    assert size() == 0 : "expected queue size to be 0, got " + size();
   }
 
-  private <T extends Comparable<T>> void clear(Queue<T> treeMap, FairQueue<T> fairq) {
+  private <T extends Comparable<T>, TNode extends Queue<T>> void clear(TNode treeMap,
+      final FairQueue<T> fairq, final AvlKeyComparator<TNode> comparator) {
     while (treeMap != null) {
       Queue<T> node = AvlTree.getFirst(treeMap);
       assert !node.isSuspended() : "can't clear suspended " + node.getKey();
-      treeMap = AvlTree.remove(treeMap, node.getKey());
+      treeMap = AvlTree.remove(treeMap, node.getKey(), comparator);
       removeFromRunQueue(fairq, node);
     }
   }
 
   @Override
-  public void signalAll() {
-    schedLock.lock();
-    try {
-      schedWaitCond.signalAll();
-    } finally {
-      schedLock.unlock();
+  public int queueSize() {
+    int count = 0;
+
+    // Server queues
+    final AvlTreeIterator<ServerQueue> serverIter = new AvlTreeIterator<ServerQueue>();
+    for (int i = 0; i < serverBuckets.length; ++i) {
+      serverIter.seekFirst(serverBuckets[i]);
+      while (serverIter.hasNext()) {
+        count += serverIter.next().size();
+      }
     }
+
+    // Table queues
+    final AvlTreeIterator<TableQueue> tableIter = new AvlTreeIterator<TableQueue>(tableMap);
+    while (tableIter.hasNext()) {
+      count += tableIter.next().size();
+    }
+    return count;
   }
 
   @Override
-  public int size() {
-    schedLock.lock();
-    try {
-      return queueSize;
-    } finally {
-      schedLock.unlock();
-    }
-  }
-
-  @Override
-  public void completionCleanup(Procedure proc) {
+  public void completionCleanup(final Procedure proc) {
     if (proc instanceof TableProcedureInterface) {
       TableProcedureInterface iProcTable = (TableProcedureInterface)proc;
       boolean tableDeleted;
       if (proc.hasException()) {
-        IOException procEx =  proc.getException().unwrapRemoteException();
+        Exception procEx = proc.getException().unwrapRemoteException();
         if (iProcTable.getTableOperationType() == TableOperationType.CREATE) {
           // create failed because the table already exist
           tableDeleted = !(procEx instanceof TableExistsException);
@@ -292,7 +248,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
         tableDeleted = (iProcTable.getTableOperationType() == TableOperationType.DELETE);
       }
       if (tableDeleted) {
-        markTableAsDeleted(iProcTable.getTableName());
+        markTableAsDeleted(iProcTable.getTableName(), proc);
         return;
       }
     } else {
@@ -302,243 +258,15 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   }
 
   private <T extends Comparable<T>> void addToRunQueue(FairQueue<T> fairq, Queue<T> queue) {
-    if (IterableList.isLinked(queue)) return;
-    if (!queue.isEmpty())  {
+    if (!AvlIterableList.isLinked(queue) &&
+        !queue.isEmpty() && !queue.isSuspended())  {
       fairq.add(queue);
-      queueSize += queue.size();
     }
   }
 
   private <T extends Comparable<T>> void removeFromRunQueue(FairQueue<T> fairq, Queue<T> queue) {
-    if (!IterableList.isLinked(queue)) return;
-    fairq.remove(queue);
-    queueSize -= queue.size();
-  }
-
-  // ============================================================================
-  //  TODO: Metrics
-  // ============================================================================
-  public long getPollCalls() {
-    return pollCalls;
-  }
-
-  public long getNullPollCalls() {
-    return nullPollCalls;
-  }
-
-  // ============================================================================
-  //  Event Helpers
-  // ============================================================================
-  public boolean waitEvent(ProcedureEvent event, Procedure procedure) {
-    return waitEvent(event, procedure, false);
-  }
-
-  public boolean waitEvent(ProcedureEvent event, Procedure procedure, boolean suspendQueue) {
-    return waitEvent(event, /* lockEvent= */false, procedure, suspendQueue);
-  }
-
-  private boolean waitEvent(ProcedureEvent event, boolean lockEvent,
-      Procedure procedure, boolean suspendQueue) {
-    synchronized (event) {
-      if (event.isReady()) {
-        if (lockEvent) {
-          event.setReady(false);
-        }
-        return false;
-      }
-
-      if (!suspendQueue) {
-        suspendProcedure(event, procedure);
-      } else if (isTableProcedure(procedure)) {
-        waitTableEvent(event, procedure);
-      } else if (isServerProcedure(procedure)) {
-        waitServerEvent(event, procedure);
-      } else {
-        // TODO: at the moment we only have Table and Server procedures
-        // if you are implementing a non-table/non-server procedure, you have two options: create
-        // a group for all the non-table/non-server procedures or try to find a key for your
-        // non-table/non-server procedures and implement something similar to the TableRunQueue.
-        throw new UnsupportedOperationException(
-          "RQs for non-table/non-server procedures are not implemented yet");
-      }
-    }
-    return true;
-  }
-
-  private void waitTableEvent(ProcedureEvent event, Procedure procedure) {
-    final TableName tableName = getTableName(procedure);
-    final boolean isDebugEnabled = LOG.isDebugEnabled();
-
-    schedLock.lock();
-    try {
-      TableQueue queue = getTableQueue(tableName);
-      queue.addFront(procedure);
-      if (queue.isSuspended()) return;
-
-      if (isDebugEnabled) {
-        LOG.debug("Suspend table queue " + tableName);
-      }
-      queue.setSuspended(true);
-      removeFromRunQueue(tableRunQueue, queue);
-      event.suspendTableQueue(queue);
-    } finally {
-      schedLock.unlock();
-    }
-  }
-
-  private void waitServerEvent(ProcedureEvent event, Procedure procedure) {
-    final ServerName serverName = getServerName(procedure);
-    final boolean isDebugEnabled = LOG.isDebugEnabled();
-
-    schedLock.lock();
-    try {
-      // TODO: This will change once we have the new AM
-      ServerQueue queue = getServerQueue(serverName);
-      queue.addFront(procedure);
-      if (queue.isSuspended()) return;
-
-      if (isDebugEnabled) {
-        LOG.debug("Suspend server queue " + serverName);
-      }
-      queue.setSuspended(true);
-      removeFromRunQueue(serverRunQueue, queue);
-      event.suspendServerQueue(queue);
-    } finally {
-      schedLock.unlock();
-    }
-  }
-
-  public void suspend(ProcedureEvent event) {
-    final boolean isDebugEnabled = LOG.isDebugEnabled();
-    synchronized (event) {
-      event.setReady(false);
-      if (isDebugEnabled) {
-        LOG.debug("Suspend event " + event);
-      }
-    }
-  }
-
-  public void wake(ProcedureEvent event) {
-    final boolean isDebugEnabled = LOG.isDebugEnabled();
-    synchronized (event) {
-      event.setReady(true);
-      if (isDebugEnabled) {
-        LOG.debug("Wake event " + event);
-      }
-
-      schedLock.lock();
-      try {
-        while (event.hasWaitingTables()) {
-          Queue<TableName> queue = event.popWaitingTable();
-          addToRunQueue(tableRunQueue, queue);
-        }
-        // TODO: This will change once we have the new AM
-        while (event.hasWaitingServers()) {
-          Queue<ServerName> queue = event.popWaitingServer();
-          addToRunQueue(serverRunQueue, queue);
-        }
-
-        while (event.hasWaitingProcedures()) {
-          wakeProcedure(event.popWaitingProcedure(false));
-        }
-
-        if (queueSize > 1) {
-          schedWaitCond.signalAll();
-        } else if (queueSize > 0) {
-          schedWaitCond.signal();
-        }
-      } finally {
-        schedLock.unlock();
-      }
-    }
-  }
-
-  private void suspendProcedure(BaseProcedureEvent event, Procedure procedure) {
-    procedure.suspend();
-    event.suspendProcedure(procedure);
-  }
-
-  private void wakeProcedure(Procedure procedure) {
-    procedure.resume();
-    doAdd(procedure, /* addFront= */ true, /* notify= */false);
-  }
-
-  private static abstract class BaseProcedureEvent {
-    private ArrayDeque<Procedure> waitingProcedures = null;
-
-    protected void suspendProcedure(Procedure proc) {
-      if (waitingProcedures == null) {
-        waitingProcedures = new ArrayDeque<Procedure>();
-      }
-      waitingProcedures.addLast(proc);
-    }
-
-    protected boolean hasWaitingProcedures() {
-      return waitingProcedures != null;
-    }
-
-    protected Procedure popWaitingProcedure(boolean popFront) {
-      // it will be nice to use IterableList on a procedure and avoid allocations...
-      Procedure proc = popFront ? waitingProcedures.removeFirst() : waitingProcedures.removeLast();
-      if (waitingProcedures.isEmpty()) {
-        waitingProcedures = null;
-      }
-      return proc;
-    }
-  }
-
-  public static class ProcedureEvent extends BaseProcedureEvent {
-    private final String description;
-
-    private Queue<ServerName> waitingServers = null;
-    private Queue<TableName> waitingTables = null;
-    private boolean ready = false;
-
-    public ProcedureEvent(String description) {
-      this.description = description;
-    }
-
-    public synchronized boolean isReady() {
-      return ready;
-    }
-
-    private synchronized void setReady(boolean isReady) {
-      this.ready = isReady;
-    }
-
-    private void suspendTableQueue(Queue<TableName> queue) {
-      waitingTables = IterableList.append(waitingTables, queue);
-    }
-
-    private void suspendServerQueue(Queue<ServerName> queue) {
-      waitingServers = IterableList.append(waitingServers, queue);
-    }
-
-    private boolean hasWaitingTables() {
-      return waitingTables != null;
-    }
-
-    private Queue<TableName> popWaitingTable() {
-      Queue<TableName> node = waitingTables;
-      waitingTables = IterableList.remove(waitingTables, node);
-      node.setSuspended(false);
-      return node;
-    }
-
-    private boolean hasWaitingServers() {
-      return waitingServers != null;
-    }
-
-    private Queue<ServerName> popWaitingServer() {
-      Queue<ServerName> node = waitingServers;
-      waitingServers = IterableList.remove(waitingServers, node);
-      node.setSuspended(false);
-      return node;
-    }
-
-    @Override
-    public String toString() {
-      return String.format("ProcedureEvent(%s)", description);
+    if (AvlIterableList.isLinked(queue)) {
+      fairq.remove(queue);
     }
   }
 
@@ -546,26 +274,26 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   //  Table Queue Lookup Helpers
   // ============================================================================
   private TableQueue getTableQueueWithLock(TableName tableName) {
-    schedLock.lock();
+    schedLock();
     try {
       return getTableQueue(tableName);
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
   private TableQueue getTableQueue(TableName tableName) {
-    Queue<TableName> node = AvlTree.get(tableMap, tableName);
-    if (node != null) return (TableQueue)node;
+    TableQueue node = AvlTree.get(tableMap, tableName, TABLE_QUEUE_KEY_COMPARATOR);
+    if (node != null) return node;
 
     NamespaceQueue nsQueue = getNamespaceQueue(tableName.getNamespaceAsString());
     node = new TableQueue(tableName, nsQueue, getTablePriority(tableName));
     tableMap = AvlTree.insert(tableMap, node);
-    return (TableQueue)node;
+    return node;
   }
 
   private void removeTableQueue(TableName tableName) {
-    tableMap = AvlTree.remove(tableMap, tableName);
+    tableMap = AvlTree.remove(tableMap, tableName, TABLE_QUEUE_KEY_COMPARATOR);
   }
 
   private int getTablePriority(TableName tableName) {
@@ -589,45 +317,40 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   //  Namespace Queue Lookup Helpers
   // ============================================================================
   private NamespaceQueue getNamespaceQueue(String namespace) {
-    Queue<String> node = AvlTree.get(namespaceMap, namespace);
+    NamespaceQueue node = AvlTree.get(namespaceMap, namespace, NAMESPACE_QUEUE_KEY_COMPARATOR);
     if (node != null) return (NamespaceQueue)node;
 
     node = new NamespaceQueue(namespace);
     namespaceMap = AvlTree.insert(namespaceMap, node);
-    return (NamespaceQueue)node;
+    return node;
   }
 
   // ============================================================================
   //  Server Queue Lookup Helpers
   // ============================================================================
   private ServerQueue getServerQueueWithLock(ServerName serverName) {
-    schedLock.lock();
+    schedLock();
     try {
       return getServerQueue(serverName);
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
   private ServerQueue getServerQueue(ServerName serverName) {
-    int index = getBucketIndex(serverBuckets, serverName.hashCode());
-    Queue<ServerName> root = getTreeRoot(serverBuckets, index);
-    Queue<ServerName> node = AvlTree.get(root, serverName);
-    if (node != null) return (ServerQueue)node;
+    final int index = getBucketIndex(serverBuckets, serverName.hashCode());
+    ServerQueue node = AvlTree.get(serverBuckets[index], serverName, SERVER_QUEUE_KEY_COMPARATOR);
+    if (node != null) return node;
 
     node = new ServerQueue(serverName);
-    serverBuckets[index] = AvlTree.insert(root, node);
+    serverBuckets[index] = AvlTree.insert(serverBuckets[index], node);
     return (ServerQueue)node;
   }
 
   private void removeServerQueue(ServerName serverName) {
-    int index = getBucketIndex(serverBuckets, serverName.hashCode());
-    serverBuckets[index] = AvlTree.remove((ServerQueue)serverBuckets[index], serverName);
-  }
-
-  @SuppressWarnings("unchecked")
-  private static <T extends Comparable<T>> Queue<T> getTreeRoot(Object[] buckets, int index) {
-    return (Queue<T>) buckets[index];
+    final int index = getBucketIndex(serverBuckets, serverName.hashCode());
+    final ServerQueue root = serverBuckets[index];
+    serverBuckets[index] = AvlTree.remove(root, serverName, SERVER_QUEUE_KEY_COMPARATOR);
   }
 
   private static int getBucketIndex(Object[] buckets, int hashCode) {
@@ -645,6 +368,13 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   // ============================================================================
   //  Table and Server Queue Implementation
   // ============================================================================
+  private static class ServerQueueKeyComparator implements AvlKeyComparator<ServerQueue> {
+    @Override
+    public int compareKey(ServerQueue node, Object key) {
+      return node.compareKey((ServerName)key);
+    }
+  }
+
   public static class ServerQueue extends QueueImpl<ServerName> {
     public ServerQueue(ServerName serverName) {
       super(serverName);
@@ -662,7 +392,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     }
   }
 
-  private static class RegionEvent extends BaseProcedureEvent {
+  private static class RegionEvent extends ProcedureEventQueue {
     private final HRegionInfo regionInfo;
     private long exclusiveLockProcIdOwner = Long.MIN_VALUE;
 
@@ -678,9 +408,9 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
       return exclusiveLockProcIdOwner == procId;
     }
 
-    public boolean tryExclusiveLock(long procIdOwner) {
+    public boolean tryExclusiveLock(final long procIdOwner) {
       assert procIdOwner != Long.MIN_VALUE;
-      if (hasExclusiveLock()) return false;
+      if (hasExclusiveLock() && !isLockOwner(procIdOwner)) return false;
       exclusiveLockProcIdOwner = procIdOwner;
       return true;
     }
@@ -695,7 +425,14 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
 
     @Override
     public String toString() {
-      return String.format("region %s event", regionInfo.getRegionNameAsString());
+      return "RegionEvent(" + regionInfo.getRegionNameAsString() + ")";
+    }
+  }
+
+  private static class TableQueueKeyComparator implements AvlKeyComparator<TableQueue> {
+    @Override
+    public int compareKey(TableQueue node, Object key) {
+      return node.compareKey((TableName)key);
     }
   }
 
@@ -725,9 +462,8 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
       if (hasExclusiveLock()) {
         // if we have an exclusive lock already taken
         // only child of the lock owner can be executed
-        Procedure availProc = peek();
-        return availProc != null && availProc.hasParent() &&
-               isLockOwner(availProc.getParentProcId());
+        final Procedure nextProc = peek();
+        return nextProc != null && hasLockAccess(nextProc);
       }
 
       // no xlock
@@ -785,6 +521,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
         case MERGE:
         case ASSIGN:
         case UNASSIGN:
+        case REGION_EDIT:
           return false;
         default:
           break;
@@ -852,6 +589,13 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     }
   }
 
+  private static class NamespaceQueueKeyComparator implements AvlKeyComparator<NamespaceQueue> {
+    @Override
+    public int compareKey(NamespaceQueue node, Object key) {
+      return node.compareKey((String)key);
+    }
+  }
+
   /**
    * the namespace is currently used just as a rwlock, not as a queue.
    * because ns operation are not frequent enough. so we want to avoid
@@ -904,29 +648,34 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    * @return true if we were able to acquire the lock on the table, otherwise false.
    */
   public boolean tryAcquireTableExclusiveLock(final Procedure procedure, final TableName table) {
-    schedLock.lock();
+    schedLock();
     TableQueue queue = getTableQueue(table);
     if (!queue.getNamespaceQueue().trySharedLock()) {
+      schedUnlock();
       return false;
     }
 
-    if (!queue.tryExclusiveLock(procedure.getProcId())) {
+    if (!queue.tryExclusiveLock(procedure)) {
       queue.getNamespaceQueue().releaseSharedLock();
-      schedLock.unlock();
+      schedUnlock();
       return false;
     }
 
     removeFromRunQueue(tableRunQueue, queue);
-    schedLock.unlock();
+    boolean hasParentLock = queue.hasParentLock(procedure);
+    schedUnlock();
 
-    // Zk lock is expensive...
-    boolean hasXLock = queue.tryZkExclusiveLock(lockManager, procedure.toString());
-    if (!hasXLock) {
-      schedLock.lock();
-      queue.releaseExclusiveLock();
-      queue.getNamespaceQueue().releaseSharedLock();
-      addToRunQueue(tableRunQueue, queue);
-      schedLock.unlock();
+    boolean hasXLock = true;
+    if (!hasParentLock) {
+      // Zk lock is expensive...
+      hasXLock = queue.tryZkExclusiveLock(lockManager, procedure.toString());
+      if (!hasXLock) {
+        schedLock();
+        if (!hasParentLock) queue.releaseExclusiveLock();
+        queue.getNamespaceQueue().releaseSharedLock();
+        addToRunQueue(tableRunQueue, queue);
+        schedUnlock();
+      }
     }
     return hasXLock;
   }
@@ -937,18 +686,19 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    * @param table the name of the table that has the exclusive lock
    */
   public void releaseTableExclusiveLock(final Procedure procedure, final TableName table) {
-    schedLock.lock();
-    TableQueue queue = getTableQueue(table);
-    schedLock.unlock();
+    final TableQueue queue = getTableQueueWithLock(table);
+    final boolean hasParentLock = queue.hasParentLock(procedure);
 
-    // Zk lock is expensive...
-    queue.releaseZkExclusiveLock(lockManager);
+    if (!hasParentLock) {
+      // Zk lock is expensive...
+      queue.releaseZkExclusiveLock(lockManager);
+    }
 
-    schedLock.lock();
-    queue.releaseExclusiveLock();
+    schedLock();
+    if (!hasParentLock) queue.releaseExclusiveLock();
     queue.getNamespaceQueue().releaseSharedLock();
     addToRunQueue(tableRunQueue, queue);
-    schedLock.unlock();
+    schedUnlock();
   }
 
   /**
@@ -964,7 +714,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
 
   private TableQueue tryAcquireTableQueueSharedLock(final Procedure procedure,
       final TableName table) {
-    schedLock.lock();
+    schedLock();
     TableQueue queue = getTableQueue(table);
     if (!queue.getNamespaceQueue().trySharedLock()) {
       return null;
@@ -972,7 +722,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
 
     if (!queue.trySharedLock()) {
       queue.getNamespaceQueue().releaseSharedLock();
-      schedLock.unlock();
+      schedUnlock();
       return null;
     }
 
@@ -981,11 +731,11 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     if (!queue.tryZkSharedLock(lockManager, procedure.toString())) {
       queue.releaseSharedLock();
       queue.getNamespaceQueue().releaseSharedLock();
-      schedLock.unlock();
+      schedUnlock();
       return null;
     }
 
-    schedLock.unlock();
+    schedUnlock();
 
     return queue;
   }
@@ -998,13 +748,15 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   public void releaseTableSharedLock(final Procedure procedure, final TableName table) {
     final TableQueue queue = getTableQueueWithLock(table);
 
-    schedLock.lock();
+    schedLock();
     // Zk lock is expensive...
     queue.releaseZkSharedLock(lockManager);
 
-    queue.releaseSharedLock();
     queue.getNamespaceQueue().releaseSharedLock();
-    schedLock.unlock();
+    if (queue.releaseSharedLock()) {
+      addToRunQueue(tableRunQueue, queue);
+    }
+    schedUnlock();
   }
 
   /**
@@ -1012,19 +764,20 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    * If there are new operations pending (e.g. a new create),
    * the remove will not be performed.
    * @param table the name of the table that should be marked as deleted
+   * @param procedure the procedure that is removing the table
    * @return true if deletion succeeded, false otherwise meaning that there are
    *     other new operations pending for that table (e.g. a new create).
    */
-  protected boolean markTableAsDeleted(final TableName table) {
-    final ReentrantLock l = schedLock;
-    l.lock();
+  @VisibleForTesting
+  protected boolean markTableAsDeleted(final TableName table, final Procedure procedure) {
+    schedLock();
     try {
       TableQueue queue = getTableQueue(table);
       if (queue == null) return true;
 
-      if (queue.isEmpty() && queue.tryExclusiveLock(0)) {
+      if (queue.isEmpty() && queue.tryExclusiveLock(procedure)) {
         // remove the table from the run-queue and the map
-        if (IterableList.isLinked(queue)) {
+        if (AvlIterableList.isLinked(queue)) {
           tableRunQueue.remove(queue);
         }
 
@@ -1041,7 +794,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
         return false;
       }
     } finally {
-      l.unlock();
+      schedUnlock();
     }
     return true;
   }
@@ -1049,10 +802,23 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
   // ============================================================================
   //  Region Locking Helpers
   // ============================================================================
+  /**
+   * Suspend the procedure if the specified region is already locked.
+   * @param procedure the procedure trying to acquire the lock on the region
+   * @param regionInfo the region we are trying to lock
+   * @return true if the procedure has to wait for the regions to be available
+   */
   public boolean waitRegion(final Procedure procedure, final HRegionInfo regionInfo) {
     return waitRegions(procedure, regionInfo.getTable(), regionInfo);
   }
 
+  /**
+   * Suspend the procedure if the specified set of regions are already locked.
+   * @param procedure the procedure trying to acquire the lock on the regions
+   * @param table the table name of the regions we are trying to lock
+   * @param regionInfo the list of regions we are trying to lock
+   * @return true if the procedure has to wait for the regions to be available
+   */
   public boolean waitRegions(final Procedure procedure, final TableName table,
       final HRegionInfo... regionInfo) {
     Arrays.sort(regionInfo);
@@ -1064,7 +830,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     } else {
       // acquire the table shared-lock
       queue = tryAcquireTableQueueSharedLock(procedure, table);
-      if (queue == null) return false;
+      if (queue == null) return true;
     }
 
     // acquire region xlocks or wait
@@ -1073,6 +839,8 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     synchronized (queue) {
       for (int i = 0; i < regionInfo.length; ++i) {
         assert regionInfo[i].getTable().equals(table);
+        assert i == 0 || regionInfo[i] != regionInfo[i-1] : "duplicate region: " + regionInfo[i];
+
         event[i] = queue.getRegionEvent(regionInfo[i]);
         if (!event[i].tryExclusiveLock(procedure.getProcId())) {
           suspendProcedure(event[i], procedure);
@@ -1088,13 +856,23 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     if (!hasLock && !procedure.hasParent()) {
       releaseTableSharedLock(procedure, table);
     }
-    return hasLock;
+    return !hasLock;
   }
 
+  /**
+   * Wake the procedures waiting for the specified region
+   * @param procedure the procedure that was holding the region
+   * @param regionInfo the region the procedure was holding
+   */
   public void wakeRegion(final Procedure procedure, final HRegionInfo regionInfo) {
     wakeRegions(procedure, regionInfo.getTable(), regionInfo);
   }
 
+  /**
+   * Wake the procedures waiting for the specified regions
+   * @param procedure the procedure that was holding the regions
+   * @param regionInfo the list of regions the procedure was holding
+   */
   public void wakeRegions(final Procedure procedure,final TableName table,
       final HRegionInfo... regionInfo) {
     Arrays.sort(regionInfo);
@@ -1104,8 +882,11 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     int numProcs = 0;
     final Procedure[] nextProcs = new Procedure[regionInfo.length];
     synchronized (queue) {
+      HRegionInfo prevRegion = null;
       for (int i = 0; i < regionInfo.length; ++i) {
         assert regionInfo[i].getTable().equals(table);
+        assert i == 0 || regionInfo[i] != regionInfo[i-1] : "duplicate region: " + regionInfo[i];
+
         RegionEvent event = queue.getRegionEvent(regionInfo[i]);
         event.releaseExclusiveLock();
         if (event.hasWaitingProcedures()) {
@@ -1118,17 +899,13 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     }
 
     // awake procedures if any
-    schedLock.lock();
+    schedLock();
     try {
       for (int i = numProcs - 1; i >= 0; --i) {
         wakeProcedure(nextProcs[i]);
       }
 
-      if (numProcs > 1) {
-        schedWaitCond.signalAll();
-      } else if (numProcs > 0) {
-        schedWaitCond.signal();
-      }
+      wakePollIfNeeded(numProcs);
 
       if (!procedure.hasParent()) {
         // release the table shared-lock.
@@ -1136,7 +913,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
         releaseTableSharedLock(procedure, table);
       }
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
@@ -1151,19 +928,19 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    * @return true if we were able to acquire the lock on the namespace, otherwise false.
    */
   public boolean tryAcquireNamespaceExclusiveLock(final Procedure procedure, final String nsName) {
-    schedLock.lock();
+    schedLock();
     try {
       TableQueue tableQueue = getTableQueue(TableName.NAMESPACE_TABLE_NAME);
       if (!tableQueue.trySharedLock()) return false;
 
       NamespaceQueue nsQueue = getNamespaceQueue(nsName);
-      boolean hasLock = nsQueue.tryExclusiveLock(procedure.getProcId());
+      boolean hasLock = nsQueue.tryExclusiveLock(procedure);
       if (!hasLock) {
         tableQueue.releaseSharedLock();
       }
       return hasLock;
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
@@ -1174,15 +951,17 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    * @param nsName the namespace that has the exclusive lock
    */
   public void releaseNamespaceExclusiveLock(final Procedure procedure, final String nsName) {
-    schedLock.lock();
+    schedLock();
     try {
-      TableQueue tableQueue = getTableQueue(TableName.NAMESPACE_TABLE_NAME);
-      tableQueue.releaseSharedLock();
+      final TableQueue tableQueue = getTableQueue(TableName.NAMESPACE_TABLE_NAME);
+      final NamespaceQueue queue = getNamespaceQueue(nsName);
 
-      NamespaceQueue queue = getNamespaceQueue(nsName);
       queue.releaseExclusiveLock();
+      if (tableQueue.releaseSharedLock()) {
+        addToRunQueue(tableRunQueue, tableQueue);
+      }
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
@@ -1198,15 +977,15 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    */
   public boolean tryAcquireServerExclusiveLock(final Procedure procedure,
       final ServerName serverName) {
-    schedLock.lock();
+    schedLock();
     try {
       ServerQueue queue = getServerQueue(serverName);
-      if (queue.tryExclusiveLock(procedure.getProcId())) {
+      if (queue.tryExclusiveLock(procedure)) {
         removeFromRunQueue(serverRunQueue, queue);
         return true;
       }
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
     return false;
   }
@@ -1219,13 +998,13 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
    */
   public void releaseServerExclusiveLock(final Procedure procedure,
       final ServerName serverName) {
-    schedLock.lock();
+    schedLock();
     try {
       ServerQueue queue = getServerQueue(serverName);
       queue.releaseExclusiveLock();
       addToRunQueue(serverRunQueue, queue);
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
@@ -1268,13 +1047,8 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     boolean isSuspended();
   }
 
-  private static abstract class Queue<TKey extends Comparable<TKey>> implements QueueInterface {
-    private Queue<TKey> avlRight = null;
-    private Queue<TKey> avlLeft = null;
-    private int avlHeight = 1;
-
-    private Queue<TKey> iterNext = null;
-    private Queue<TKey> iterPrev = null;
+  private static abstract class Queue<TKey extends Comparable<TKey>>
+      extends AvlLinkedNode<Queue<TKey>> implements QueueInterface {
     private boolean suspended = false;
 
     private long exclusiveLockProcIdOwner = Long.MIN_VALUE;
@@ -1330,8 +1104,8 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
       return true;
     }
 
-    public synchronized void releaseSharedLock() {
-      sharedLock--;
+    public synchronized boolean releaseSharedLock() {
+      return --sharedLock == 0;
     }
 
     protected synchronized boolean isSingleSharedLock() {
@@ -1342,10 +1116,17 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
       return exclusiveLockProcIdOwner == procId;
     }
 
-    public synchronized boolean tryExclusiveLock(long procIdOwner) {
-      assert procIdOwner != Long.MIN_VALUE;
-      if (isLocked()) return false;
-      exclusiveLockProcIdOwner = procIdOwner;
+    public synchronized boolean hasParentLock(final Procedure proc) {
+      return proc.hasParent() && isLockOwner(proc.getParentProcId());
+    }
+
+    public synchronized boolean hasLockAccess(final Procedure proc) {
+      return isLockOwner(proc.getProcId()) || hasParentLock(proc);
+    }
+
+    public synchronized boolean tryExclusiveLock(final Procedure proc) {
+      if (isLocked()) return hasLockAccess(proc);
+      exclusiveLockProcIdOwner = proc.getProcId();
       return true;
     }
 
@@ -1366,13 +1147,15 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
       return key.compareTo(cmpKey);
     }
 
+    @Override
     public int compareTo(Queue<TKey> other) {
       return compareKey(other.key);
     }
 
     @Override
     public String toString() {
-      return String.format("%s(%s)", getClass().getSimpleName(), key);
+      return String.format("%s(%s, suspended=%s xlock=%s sharedLock=%s size=%s)",
+        getClass().getSimpleName(), key, isSuspended(), hasExclusiveLock(), sharedLock, size());
     }
   }
 
@@ -1431,6 +1214,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
     private Queue<T> currentQueue = null;
     private Queue<T> queueHead = null;
     private int currentQuantum = 0;
+    private int size = 0;
 
     public FairQueue() {
       this(1);
@@ -1440,17 +1224,23 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
       this.quantum = quantum;
     }
 
+    public boolean hasRunnables() {
+      return size > 0;
+    }
+
     public void add(Queue<T> queue) {
-      queueHead = IterableList.append(queueHead, queue);
+      queueHead = AvlIterableList.append(queueHead, queue);
       if (currentQueue == null) setNextQueue(queueHead);
+      size++;
     }
 
     public void remove(Queue<T> queue) {
-      Queue<T> nextQueue = queue.iterNext;
-      queueHead = IterableList.remove(queueHead, queue);
+      Queue<T> nextQueue = AvlIterableList.readNext(queue);
+      queueHead = AvlIterableList.remove(queueHead, queue);
       if (currentQueue == queue) {
         setNextQueue(queueHead != null ? nextQueue : null);
       }
+      size--;
     }
 
     public Queue<T> poll() {
@@ -1478,7 +1268,7 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
 
     private boolean nextQueue() {
       if (currentQueue == null) return false;
-      currentQueue = currentQueue.iterNext;
+      currentQueue = AvlIterableList.readNext(currentQueue);
       return currentQueue != null;
     }
 
@@ -1493,189 +1283,6 @@ public class MasterProcedureScheduler implements ProcedureRunnableSet {
 
     private int calculateQuantum(final Queue queue) {
       return Math.max(1, queue.getPriority() * quantum); // TODO
-    }
-  }
-
-  private static class AvlTree {
-    public static <T extends Comparable<T>> Queue<T> get(Queue<T> root, T key) {
-      while (root != null) {
-        int cmp = root.compareKey(key);
-        if (cmp > 0) {
-          root = root.avlLeft;
-        } else if (cmp < 0) {
-          root = root.avlRight;
-        } else {
-          return root;
-        }
-      }
-      return null;
-    }
-
-    public static <T extends Comparable<T>> Queue<T> getFirst(Queue<T> root) {
-      if (root != null) {
-        while (root.avlLeft != null) {
-          root = root.avlLeft;
-        }
-      }
-      return root;
-    }
-
-    public static <T extends Comparable<T>> Queue<T> getLast(Queue<T> root) {
-      if (root != null) {
-        while (root.avlRight != null) {
-          root = root.avlRight;
-        }
-      }
-      return root;
-    }
-
-    public static <T extends Comparable<T>> Queue<T> insert(Queue<T> root, Queue<T> node) {
-      if (root == null) return node;
-      if (node.compareTo(root) < 0) {
-        root.avlLeft = insert(root.avlLeft, node);
-      } else {
-        root.avlRight = insert(root.avlRight, node);
-      }
-      return balance(root);
-    }
-
-    private static <T extends Comparable<T>> Queue<T> removeMin(Queue<T> p) {
-      if (p.avlLeft == null)
-        return p.avlRight;
-      p.avlLeft = removeMin(p.avlLeft);
-      return balance(p);
-    }
-
-    public static <T extends Comparable<T>> Queue<T> remove(Queue<T> root, T key) {
-      if (root == null) return null;
-
-      int cmp = root.compareKey(key);
-      if (cmp == 0) {
-        Queue<T> q = root.avlLeft;
-        Queue<T> r = root.avlRight;
-        if (r == null) return q;
-        Queue<T> min = getFirst(r);
-        min.avlRight = removeMin(r);
-        min.avlLeft = q;
-        return balance(min);
-      } else if (cmp > 0) {
-        root.avlLeft = remove(root.avlLeft, key);
-      } else /* if (cmp < 0) */ {
-        root.avlRight = remove(root.avlRight, key);
-      }
-      return balance(root);
-    }
-
-    private static <T extends Comparable<T>> Queue<T> balance(Queue<T> p) {
-      fixHeight(p);
-      int balance = balanceFactor(p);
-      if (balance == 2) {
-        if (balanceFactor(p.avlRight) < 0) {
-          p.avlRight = rotateRight(p.avlRight);
-        }
-        return rotateLeft(p);
-      } else if (balance == -2) {
-        if (balanceFactor(p.avlLeft) > 0) {
-          p.avlLeft = rotateLeft(p.avlLeft);
-        }
-        return rotateRight(p);
-      }
-      return p;
-    }
-
-    private static <T extends Comparable<T>> Queue<T> rotateRight(Queue<T> p) {
-      Queue<T> q = p.avlLeft;
-      p.avlLeft = q.avlRight;
-      q.avlRight = p;
-      fixHeight(p);
-      fixHeight(q);
-      return q;
-    }
-
-    private static <T extends Comparable<T>> Queue<T> rotateLeft(Queue<T> q) {
-      Queue<T> p = q.avlRight;
-      q.avlRight = p.avlLeft;
-      p.avlLeft = q;
-      fixHeight(q);
-      fixHeight(p);
-      return p;
-    }
-
-    private static <T extends Comparable<T>> void fixHeight(Queue<T> node) {
-      int heightLeft = height(node.avlLeft);
-      int heightRight = height(node.avlRight);
-      node.avlHeight = 1 + Math.max(heightLeft, heightRight);
-    }
-
-    private static <T extends Comparable<T>> int height(Queue<T> node) {
-      return node != null ? node.avlHeight : 0;
-    }
-
-    private static <T extends Comparable<T>> int balanceFactor(Queue<T> node) {
-      return height(node.avlRight) - height(node.avlLeft);
-    }
-  }
-
-  private static class IterableList {
-    public static <T extends Comparable<T>> Queue<T> prepend(Queue<T> head, Queue<T> node) {
-      assert !isLinked(node) : node + " is already linked";
-      if (head != null) {
-        Queue<T> tail = head.iterPrev;
-        tail.iterNext = node;
-        head.iterPrev = node;
-        node.iterNext = head;
-        node.iterPrev = tail;
-      } else {
-        node.iterNext = node;
-        node.iterPrev = node;
-      }
-      return node;
-    }
-
-    public static <T extends Comparable<T>> Queue<T> append(Queue<T> head, Queue<T> node) {
-      assert !isLinked(node) : node + " is already linked";
-      if (head != null) {
-        Queue<T> tail = head.iterPrev;
-        tail.iterNext = node;
-        node.iterNext = head;
-        node.iterPrev = tail;
-        head.iterPrev = node;
-        return head;
-      }
-      node.iterNext = node;
-      node.iterPrev = node;
-      return node;
-    }
-
-    public static <T extends Comparable<T>> Queue<T> appendList(Queue<T> head, Queue<T> otherHead) {
-      if (head == null) return otherHead;
-      if (otherHead == null) return head;
-
-      Queue<T> tail = head.iterPrev;
-      Queue<T> otherTail = otherHead.iterPrev;
-      tail.iterNext = otherHead;
-      otherHead.iterPrev = tail;
-      otherTail.iterNext = head;
-      head.iterPrev = otherTail;
-      return head;
-    }
-
-    private static <T extends Comparable<T>> Queue<T> remove(Queue<T> head, Queue<T> node) {
-      assert isLinked(node) : node + " is not linked";
-      if (node != node.iterNext) {
-        node.iterPrev.iterNext = node.iterNext;
-        node.iterNext.iterPrev = node.iterPrev;
-        head = (head == node) ? node.iterNext : head;
-      } else {
-        head = null;
-      }
-      node.iterNext = null;
-      node.iterPrev = null;
-      return head;
-    }
-
-    private static <T extends Comparable<T>> boolean isLinked(Queue<T> node) {
-      return node.iterPrev != null && node.iterNext != null;
     }
   }
 }

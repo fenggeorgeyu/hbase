@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.hbase.ipc;
 
-import com.google.protobuf.RpcCallback;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcCallback;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -46,7 +46,7 @@ public class BlockingRpcCallback<R> implements RpcCallback<R> {
     synchronized (this) {
       result = parameter;
       resultSet = true;
-      this.notify();
+      this.notifyAll();
     }
   }
 

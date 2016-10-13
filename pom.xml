@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
-  <!--
+<!--
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -49,16 +49,29 @@
   </description>
   <url>http://hbase.apache.org</url>
   <inceptionYear>2007</inceptionYear>
+  <!-- Set here so we can consistently use the correct name, even on branches with
+       an ASF parent pom older than v15. Also uses the url from v18.
+    -->
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
   <modules>
     <module>hbase-resource-bundle</module>
     <module>hbase-server</module>
     <module>hbase-thrift</module>
     <module>hbase-shell</module>
+    <module>hbase-protocol-shaded</module>
     <module>hbase-protocol</module>
     <module>hbase-client</module>
     <module>hbase-hadoop-compat</module>
     <module>hbase-common</module>
     <module>hbase-procedure</module>
+    <module>hbase-endpoint</module>
     <module>hbase-it</module>
     <module>hbase-examples</module>
     <module>hbase-prefix-tree</module>
@@ -146,416 +159,318 @@
       <name>Amitanand S. Aiyer</name>
       <email>acube123@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>appy</id>
       <name>Apekshit Sharma</name>
       <email>appy@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>apurtell</id>
       <name>Andrew Purtell</name>
       <email>apurtell@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Salesforce.com</organization>
-      <organizationUrl>http://www.salesforce.com/</organizationUrl>
     </developer>
     <developer>
       <id>anoopsamjohn</id>
       <name>Anoop Sam John</name>
       <email>anoopsamjohn@apache.org</email>
       <timezone>+5</timezone>
-      <organization>Intel</organization>
-      <organizationUrl>http://www.intel.com</organizationUrl>
     </developer>
     <developer>
       <id>antonov</id>
       <name>Mikhail Antonov</name>
       <email>antonov@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com/</organizationUrl>
     </developer>
     <developer>
       <id>ashishsinghi</id>
       <name>Ashish Singhi</name>
       <email>ashishsinghi@apache.org</email>
       <timezone>+5</timezone>
-      <organization>Huawei</organization>
-      <organizationUrl>http://www.huawei.com/en/</organizationUrl>
     </developer>
     <developer>
       <id>busbey</id>
       <name>Sean Busbey</name>
       <email>busbey@apache.org</email>
       <timezone>-6</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>chenheng</id>
       <name>Heng Chen</name>
       <email>chenheng@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Yuantiku</organization>
-      <organizationUrl>http://www.yuantiku.com</organizationUrl>
     </developer>
     <developer>
       <id>ddas</id>
       <name>Devaraj Das</name>
       <email>ddas@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
+    </developer>
+    <developer>
+      <id>dimaspivak</id>
+      <name>Dima Spivak</name>
+      <email>dimaspivak@apache.org</email>
+      <timezone>-8</timezone>
     </developer>
     <developer>
       <id>dmeil</id>
       <name>Doug Meil</name>
       <email>dmeil@apache.org</email>
       <timezone>-5</timezone>
-      <organization>Explorys</organization>
-      <organizationUrl>http://www.explorys.com</organizationUrl>
     </developer>
     <developer>
       <id>eclark</id>
       <name>Elliott Clark</name>
       <email>eclark@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>enis</id>
       <name>Enis Soztutar</name>
       <email>enis@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
     </developer>
     <developer>
       <id>fenghh</id>
       <name>Honghua Feng</name>
       <email>fenghh@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Xiaomi</organization>
-      <organizationUrl>http://www.xiaomi.com</organizationUrl>
     </developer>
     <developer>
       <id>garyh</id>
       <name>Gary Helmling</name>
       <email>garyh@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>gchanan</id>
       <name>Gregory Chanan</name>
       <email>gchanan@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>jdcryans</id>
       <name>Jean-Daniel Cryans</name>
       <email>jdcryans@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>jeffreyz</id>
       <name>Jeffrey Zhong</name>
       <email>jeffreyz@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
     </developer>
     <developer>
       <id>jerryjch</id>
       <name>Jing Chen (Jerry) He</name>
       <email>jerryjch@apache.org</email>
       <timezone>-8</timezone>
-      <organization>IBM</organization>
-      <organizationUrl>http://www.ibm.com</organizationUrl>
     </developer>
     <developer>
       <id>jyates</id>
       <name>Jesse Yates</name>
       <email>jyates@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Salesforce.com</organization>
-      <organizationUrl>http://www.salesforce.com/</organizationUrl>
     </developer>
     <developer>
       <id>jgray</id>
       <name>Jonathan Gray</name>
       <email>jgray@fb.com</email>
       <timezone>-8</timezone>
-      <organization>Continuuity</organization>
-      <organizationUrl>http://www.continuuity.com</organizationUrl>
     </developer>
     <developer>
       <id>jingchengdu</id>
       <name>Jingcheng Du</name>
       <email>jingchengdu@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Intel</organization>
-      <organizationUrl>http://www.intel.com</organizationUrl>
     </developer>
     <developer>
       <id>esteban</id>
       <name>Esteban Gutierrez</name>
       <email>esteban@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>jmhsieh</id>
       <name>Jonathan Hsieh</name>
       <email>jmhsieh@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>jxiang</id>
       <name>Jimmy Xiang</name>
       <email>jxiang@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>kannan</id>
       <name>Kannan Muthukkaruppan</name>
       <email>kannan@fb.com</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>karthik</id>
       <name>Karthik Ranganathan</name>
       <email>kranganathan@fb.com</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>larsgeorge</id>
       <name>Lars George</name>
       <email>larsgeorge@apache.org</email>
       <timezone>+1</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com/</organizationUrl>
     </developer>
     <developer>
       <id>larsh</id>
       <name>Lars Hofhansl</name>
       <email>larsh@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Salesforce.com</organization>
-      <organizationUrl>http://www.salesforce.com/</organizationUrl>
     </developer>
     <developer>
       <id>liangxie</id>
       <name>Liang Xie</name>
       <email>liangxie@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Xiaomi</organization>
-      <organizationUrl>http://www.xiaomi.com/</organizationUrl>
     </developer>
     <developer>
       <id>liushaohui</id>
       <name>Shaohui Liu</name>
       <email>liushaohui@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Xiaomi</organization>
-      <organizationUrl>http://www.xiaomi.com/</organizationUrl>
     </developer>
     <developer>
       <id>liyin</id>
       <name>Liyin Tang</name>
       <email>liyin.tang@fb.com</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>liyu</id>
       <name>Yu Li</name>
       <email>liyu@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Alibaba</organization>
-      <organizationUrl>http://www.taobao.com</organizationUrl>
     </developer>
     <developer>
       <id>mbautin</id>
       <name>Mikhail Bautin</name>
       <email>mbautin@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>mbertozzi</id>
       <name>Matteo Bertozzi</name>
       <email>mbertozzi@apache.org</email>
       <timezone>0</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>misty</id>
       <name>Misty Stanley-Jones</name>
       <email>misty@apache.org</email>
       <timezone>+10</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>ndimiduk</id>
       <name>Nick Dimiduk</name>
       <email>ndimiduk@apache.org</email>
       <timezone>-8</timezone>
-      <organization>unaffiliated</organization>
-      <organizationUrl>http://www.n10k.com</organizationUrl>
     </developer>
     <developer>
       <id>nkeywal</id>
       <name>Nicolas Liochon</name>
       <email>nkeywal@apache.org</email>
       <timezone>+1</timezone>
-      <organization>Scaled Risk</organization>
-      <organizationUrl>http://www.scaledrisk.com</organizationUrl>
     </developer>
     <developer>
       <id>nspiegelberg</id>
       <name>Nicolas Spiegelberg</name>
       <email>nspiegelberg@fb.com</email>
       <timezone>-8</timezone>
-      <organization>Facebook</organization>
-      <organizationUrl>http://www.facebook.com</organizationUrl>
     </developer>
     <developer>
       <id>octo47</id>
       <name>Andrey Stepachev</name>
       <email>octo47@gmail.com</email>
       <timezone>0</timezone>
-      <organization>Dropbox</organization>
-      <organizationUrl>https://www.dropbox.com/</organizationUrl>
     </developer>
     <developer>
       <id>rajeshbabu</id>
       <name>Rajeshbabu Chintaguntla</name>
       <email>rajeshbabu@apache.org</email>
       <timezone>+5</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
     </developer>
     <developer>
       <id>ramkrishna</id>
       <name>Ramkrishna S Vasudevan</name>
       <email>ramkrishna@apache.org</email>
       <timezone>+5</timezone>
-      <organization>Intel</organization>
-      <organizationUrl>http://www.intel.in</organizationUrl>
     </developer>
     <developer>
       <id>rawson</id>
       <name>Ryan Rawson</name>
       <email>rawson@apache.org</email>
       <timezone>-8</timezone>
-      <organization>WANdisco</organization>
-      <organizationUrl>http://www.wandisco.com/</organizationUrl>
     </developer>
     <developer>
       <id>sershe</id>
       <name>Sergey Shelukhin</name>
       <email>sershe@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
     </developer>
     <developer>
       <id>ssrungarapu</id>
       <name>Srikanth Srungarapu</name>
       <email>ssrungarapu@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>stack</id>
       <name>Michael Stack</name>
       <email>stack@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com/</organizationUrl>
     </developer>
     <developer>
       <id>syuanjiang</id>
       <name>Stephen Yuan Jiang</name>
       <email>syuanjiang@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
     </developer>
     <developer>
       <id>tedyu</id>
       <name>Ted Yu</name>
       <email>yuzhihong@gmail.com</email>
       <timezone>-8</timezone>
-      <organization>Hortonworks</organization>
-      <organizationUrl>http://www.hortonworks.com</organizationUrl>
     </developer>
     <developer>
       <id>todd</id>
       <name>Todd Lipcon</name>
       <email>todd@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Cloudera</organization>
-      <organizationUrl>http://www.cloudera.com</organizationUrl>
     </developer>
     <developer>
       <id>toffer</id>
       <name>Francis Liu</name>
       <email>toffer@apache.org</email>
       <timezone>-8</timezone>
-      <organization>Yahoo</organization>
-      <organizationUrl>http://www.yahoo.com</organizationUrl>
     </developer>
     <developer>
       <id>virag</id>
       <name>Virag Kothari</name>
       <email>virag@yahoo-inc.com</email>
       <timezone>-8</timezone>
-      <organization>Yahoo!</organization>
-      <organizationUrl>http://www.yahoo.com</organizationUrl>
     </developer>
     <developer>
       <id>zhangduo</id>
       <name>Duo Zhang</name>
       <email>zhangduo@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Xiaomi</organization>
-      <organizationUrl>http://www.mi.com</organizationUrl>
     </developer>
     <developer>
       <id>zjushch</id>
       <name>Chunhui Shen</name>
       <email>zjushch@apache.org</email>
       <timezone>+8</timezone>
-      <organization>Taobao</organization>
-      <organizationUrl>http://www.taobao.com</organizationUrl>
     </developer>
   </developers>
   <build>
@@ -740,12 +655,17 @@
             </execution>
           </executions>
           <configuration>
+            <skipIfEmpty>true</skipIfEmpty>
             <excludes>
               <exclude>hbase-site.xml</exclude>
               <exclude>hdfs-site.xml</exclude>
               <exclude>log4j.properties</exclude>
               <exclude>mapred-queues.xml</exclude>
               <exclude>mapred-site.xml</exclude>
+              <!--I was seeing this w/o the below addition:
+                   [ERROR] Failed to execute goal org.apache.maven.plugins:maven-jar-plugin:2.4:jar (default-jar) on project hbase-protocol-shaded: Error assembling JAR: A zip file cannot include itself -> [Help 1]
+                -->
+              <exclude>*.jar</exclude>
             </excludes>
           </configuration>
         </plugin>
@@ -874,8 +794,9 @@
               <exclude>**/patchprocess/**</exclude>
               <exclude>src/main/site/resources/repo/**</exclude>
               <exclude>**/dependency-reduced-pom.xml</exclude>
-              <exclude>**/ESAPI.properties</exclude>
               <exclude>**/rat.txt</exclude>
+              <!-- exclude the shaded protobuf files -->
+              <exclude>**/shaded/com/google/protobuf/**</exclude>
             </excludes>
           </configuration>
         </plugin>
@@ -932,36 +853,58 @@
           </dependency>
         </dependencies>
         <!-- version set by parent -->
-        <configuration>
-          <rules>
-            <!-- The earliest maven version we verify builds for via ASF Jenkins -->
-            <requireMavenVersion>
-              <version>[${maven.min.version},)</version>
-              <message>Maven is out of date.
+        <executions>
+          <execution>
+            <id>min-maven-min-java-banned-xerces</id>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <!-- The earliest maven version we verify builds for via ASF Jenkins -->
+                <requireMavenVersion>
+                  <version>[${maven.min.version},)</version>
+                  <message>Maven is out of date.
   HBase requires at least version ${maven.min.version} of Maven to properly build from source.
   You appear to be using an older version. You can use either "mvn -version" or
   "mvn enforcer:display-info" to verify what version is active.
   See the reference guide on building for more information: http://hbase.apache.org/book.html#build
-              </message>
-            </requireMavenVersion>
-            <!-- The earliest JVM version we verify builds for via ASF Jenkins -->
-            <requireJavaVersion>
-              <version>[${java.min.version},)</version>
-              <message>Java is out of date.
+                  </message>
+                </requireMavenVersion>
+                <!-- The earliest JVM version we verify builds for via ASF Jenkins -->
+                <requireJavaVersion>
+                  <version>[${java.min.version},)</version>
+                  <message>Java is out of date.
   HBase requirs at least version ${java.min.version} of the JDK to properly build from source.
   You appear to be using an older version. You can use either "mvn -version" or
   "mvn enforcer:display-info" to verify what version is active.
   See the reference guide on building for more information: http://hbase.apache.org/book.html#build
-              </message>
-            </requireJavaVersion>
-          </rules>
-        </configuration>
-        <executions>
+                  </message>
+                </requireJavaVersion>
+                <bannedDependencies>
+                  <excludes>
+                    <exclude>xerces:xercesImpl</exclude>
+                  </excludes>
+                  <message>We avoid adding our own Xerces jars to the classpath, see HBASE-16340.</message>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
           <execution>
-            <id>enforce</id>
+            <id>banned-jsr305</id>
             <goals>
               <goal>enforce</goal>
             </goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <excludes>
+                    <exclude>com.google.code.findbugs:jsr305</exclude>
+                  </excludes>
+                  <message>We don't allow the JSR305 jar from the Findbugs project, see HBASE-16321.</message>
+                </bannedDependencies>
+              </rules>
+            </configuration>
           </execution>
         </executions>
       </plugin>
@@ -1229,7 +1172,7 @@
       yyyy-MM-dd'T'HH:mm
     </maven.build.timestamp.format>
     <buildDate>${maven.build.timestamp}</buildDate>
-    <compileSource>1.7</compileSource>
+    <compileSource>1.8</compileSource>
     <!-- Build dependencies -->
     <maven.min.version>3.0.4</maven.min.version>
     <java.min.version>${compileSource}</java.min.version>
@@ -1254,11 +1197,10 @@
     <disruptor.version>3.3.0</disruptor.version>
     <!-- Do not use versions earlier than 3.2.2 due to a security vulnerability -->
     <collections.version>3.2.2</collections.version>
-    <httpclient.version>4.3.6</httpclient.version>
+    <httpclient.version>4.5.2</httpclient.version>
     <httpcore.version>4.4.4</httpcore.version>
     <metrics-core.version>3.1.2</metrics-core.version>
     <guava.version>12.0.1</guava.version>
-    <jsr305.version>1.3.9</jsr305.version>
     <jackson.version>1.9.13</jackson.version>
     <jasper.version>5.5.23</jasper.version>
     <jaxb-api.version>2.2.2</jaxb-api.version>
@@ -1329,10 +1271,10 @@
     <!--Mark our test runs with '-Dhbase.build.id' so we can identify a surefire test as ours in a process listing
      -->
     <hbase-surefire.argLine>-enableassertions -Dhbase.build.id=${build.id} -Xmx${surefire.Xmx}
-      -XX:MaxPermSize=256m -Djava.security.egd=file:/dev/./urandom -Djava.net.preferIPv4Stack=true
+      -Djava.security.egd=file:/dev/./urandom -Djava.net.preferIPv4Stack=true
       -Djava.awt.headless=true
     </hbase-surefire.argLine>
-    <hbase-surefire.cygwin-argLine>-enableassertions -Xmx${surefire.cygwinXmx} -XX:MaxPermSize=256m
+    <hbase-surefire.cygwin-argLine>-enableassertions -Xmx${surefire.cygwinXmx}
       -Djava.security.egd=file:/dev/./urandom -Djava.net.preferIPv4Stack=true
       "-Djava.library.path=${hadoop.library.path};${java.library.path}"
     </hbase-surefire.cygwin-argLine>
@@ -1382,6 +1324,11 @@
         <version>${project.version}</version>
         <type>test-jar</type>
         <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hbase</groupId>
+        <artifactId>hbase-protocol-shaded</artifactId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.hbase</groupId>
@@ -1448,6 +1395,11 @@
         <scope>test</scope>
       </dependency>
       <dependency>
+        <artifactId>hbase-endpoint</artifactId>
+        <groupId>org.apache.hbase</groupId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
         <artifactId>hbase-shell</artifactId>
         <groupId>org.apache.hbase</groupId>
         <version>${project.version}</version>
@@ -1509,6 +1461,12 @@
       </dependency>
       <!-- General dependencies -->
       <dependency>
+        <groupId>com.github.stephenc.findbugs</groupId>
+        <artifactId>findbugs-annotations</artifactId>
+        <version>${findbugs-annotations}</version>
+      </dependency>
+      <!-- General dependencies -->
+      <dependency>
         <groupId>org.codehaus.jettison</groupId>
         <artifactId>jettison</artifactId>
         <version>${jettison.version}</version>
@@ -1534,11 +1492,12 @@
         <groupId>com.google.guava</groupId>
         <artifactId>guava</artifactId>
         <version>${guava.version}</version>
-      </dependency>
-      <dependency>
-         <groupId>com.google.code.findbugs</groupId>
-         <artifactId>jsr305</artifactId>
-         <version>${jsr305.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>com.google.code.findbugs</groupId>
+            <artifactId>jsr305</artifactId>
+          </exclusion>
+        </exclusions>
       </dependency>
       <dependency>
         <groupId>commons-collections</groupId>
@@ -1854,7 +1813,6 @@
     <dependency>
       <groupId>com.github.stephenc.findbugs</groupId>
       <artifactId>findbugs-annotations</artifactId>
-      <version>${findbugs-annotations}</version>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -2156,6 +2114,10 @@
                 <groupId>stax</groupId>
                 <artifactId>stax-api</artifactId>
               </exclusion>
+              <exclusion>
+                <groupId>xerces</groupId>
+                <artifactId>xercesImpl</artifactId>
+              </exclusion>
             </exclusions>
             <version>${hadoop-two.version}</version>
           </dependency>
@@ -2181,6 +2143,10 @@
               <exclusion>
                 <groupId>stax</groupId>
                 <artifactId>stax-api</artifactId>
+              </exclusion>
+              <exclusion>
+                <groupId>xerces</groupId>
+                <artifactId>xercesImpl</artifactId>
               </exclusion>
             </exclusions>
           </dependency>
@@ -2210,6 +2176,10 @@
                 <groupId>io.netty</groupId>
                 <artifactId>netty</artifactId>
               </exclusion>
+              <exclusion>
+                <groupId>com.google.code.findbugs</groupId>
+                <artifactId>jsr305</artifactId>
+              </exclusion>
             </exclusions>
           </dependency>
           <dependency>
@@ -2224,6 +2194,10 @@
             <artifactId>hadoop-minicluster</artifactId>
             <version>${hadoop-two.version}</version>
             <exclusions>
+            <exclusion>
+              <groupId>commons-httpclient</groupId>
+              <artifactId>commons-httpclient</artifactId>
+            </exclusion>
               <exclusion>
                 <groupId>javax.servlet.jsp</groupId>
                 <artifactId>jsp-api</artifactId>
@@ -2239,6 +2213,10 @@
               <exclusion>
                 <groupId>io.netty</groupId>
                 <artifactId>netty</artifactId>
+              </exclusion>
+              <exclusion>
+                <groupId>com.google.code.findbugs</groupId>
+                <artifactId>jsr305</artifactId>
               </exclusion>
             </exclusions>
           </dependency>
@@ -2326,6 +2304,10 @@
                <groupId>stax</groupId>
                <artifactId>stax-api</artifactId>
              </exclusion>
+             <exclusion>
+               <groupId>xerces</groupId>
+               <artifactId>xercesImpl</artifactId>
+             </exclusion>
            </exclusions>
            <version>${hadoop-three.version}</version>
          </dependency>
@@ -2347,6 +2329,10 @@
              <exclusion>
                <groupId>stax</groupId>
                <artifactId>stax-api</artifactId>
+             </exclusion>
+             <exclusion>
+               <groupId>xerces</groupId>
+               <artifactId>xercesImpl</artifactId>
              </exclusion>
            </exclusions>
          </dependency>
@@ -2376,6 +2362,10 @@
                <groupId>io.netty</groupId>
                <artifactId>netty</artifactId>
              </exclusion>
+             <exclusion>
+               <groupId>com.google.code.findbugs</groupId>
+               <artifactId>jsr305</artifactId>
+             </exclusion>
            </exclusions>
          </dependency>
          <dependency>
@@ -2395,6 +2385,10 @@
            <artifactId>hadoop-minicluster</artifactId>
            <version>${hadoop-three.version}</version>
            <exclusions>
+            <exclusion>
+              <groupId>commons-httpclient</groupId>
+              <artifactId>commons-httpclient</artifactId>
+            </exclusion>
              <exclusion>
                <groupId>javax.servlet.jsp</groupId>
                <artifactId>jsp-api</artifactId>
@@ -2410,6 +2404,10 @@
              <exclusion>
                <groupId>io.netty</groupId>
                <artifactId>netty</artifactId>
+             </exclusion>
+             <exclusion>
+               <groupId>com.google.code.findbugs</groupId>
+               <artifactId>jsr305</artifactId>
              </exclusion>
            </exclusions>
          </dependency>
@@ -2775,7 +2773,7 @@
          or you can provide the license with -Dmaven.clover.licenseLocation=/path/to/license. Committers can find
          the license under https://svn.apache.org/repos/private/committers/donated-licenses/clover/
          The report will be generated under target/site/clover/index.html when you run
-         MAVEN_OPTS="-Xmx2048m -XX:MaxPermSize=512m" mvn clean package -Pclover site -->
+         MAVEN_OPTS="-Xmx2048m" mvn clean package -Pclover site -->
     <profile>
       <id>clover</id>
       <activation>
@@ -2848,7 +2846,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
-                    <version>3.1</version>
+                    <version>3.5.1</version>
                     <configuration>
                         <compilerId>javac-with-errorprone</compilerId>
                         <forceJavacCompilerUse>true</forceJavacCompilerUse>

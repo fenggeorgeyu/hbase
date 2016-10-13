@@ -20,6 +20,8 @@ package org.apache.hadoop.hbase.ipc;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHORIZATION;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -59,6 +61,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -75,31 +78,27 @@ import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseIOException;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.Server;
-import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.client.Operation;
 import org.apache.hadoop.hbase.client.VersionInfoUtil;
 import org.apache.hadoop.hbase.codec.Codec;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.exceptions.RegionMovedException;
 import org.apache.hadoop.hbase.io.ByteBufferInputStream;
+import org.apache.hadoop.hbase.io.ByteBufferListOutputStream;
 import org.apache.hadoop.hbase.io.ByteBufferOutputStream;
 import org.apache.hadoop.hbase.io.ByteBufferPool;
-import org.apache.hadoop.hbase.io.ByteBufferListOutputStream;
 import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.VersionInfo;
-import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.CellBlockMeta;
-import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ConnectionHeader;
-import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ExceptionResponse;
-import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.RequestHeader;
-import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ResponseHeader;
-import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.UserInformation;
-import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.VersionInfo;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.CellBlockMeta;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.ConnectionHeader;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.ExceptionResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.RequestHeader;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.ResponseHeader;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.UserInformation;
 import org.apache.hadoop.hbase.security.AccessDeniedException;
 import org.apache.hadoop.hbase.security.AuthMethod;
 import org.apache.hadoop.hbase.security.HBasePolicyProvider;
@@ -112,7 +111,6 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.security.token.AuthenticationTokenSecretManager;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.Counter;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.io.BytesWritable;
@@ -134,14 +132,13 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.htrace.TraceInfo;
 import org.codehaus.jackson.map.ObjectMapper;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.google.protobuf.BlockingService;
-import com.google.protobuf.CodedInputStream;
-import com.google.protobuf.CodedOutputStream;
-import com.google.protobuf.Descriptors.MethodDescriptor;
-import com.google.protobuf.Message;
-import com.google.protobuf.ServiceException;
-import com.google.protobuf.TextFormat;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.BlockingService;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.CodedInputStream;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.CodedOutputStream;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.Descriptors.MethodDescriptor;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.TextFormat;
 
 /**
  * An RPC server that hosts protobuf described Services.
@@ -161,7 +158,7 @@ import com.google.protobuf.TextFormat;
  * CallRunner#run executes the call.  When done, asks the included Call to put itself on new
  * queue for Responder to pull from and return result to client.
  *
- * @see RpcClientImpl
+ * @see BlockingRpcClient
  */
 @InterfaceAudience.LimitedPrivate({HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX})
 @InterfaceStability.Evolving
@@ -187,7 +184,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
    */
   static final int DEFAULT_MAX_CALLQUEUE_LENGTH_PER_HANDLER = 10;
 
-  private final IPCUtil ipcUtil;
+  private final CellBlockBuilder cellBlockBuilder;
 
   private static final String AUTH_FAILED_FOR = "Auth failed for ";
   private static final String AUTH_SUCCESSFUL_FOR = "Auth successful for ";
@@ -231,7 +228,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
    * This is a running count of the size in bytes of all outstanding calls whether currently
    * executing or queued waiting to be run.
    */
-  protected final Counter callQueueSizeInBytes = new Counter();
+  protected final LongAdder callQueueSizeInBytes = new LongAdder();
 
   protected int socketSendBufferSize;
   protected final boolean tcpNoDelay;   // if T then disable Nagle's Algorithm
@@ -312,6 +309,9 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
     protected long timestamp;      // the time received when response is null
                                    // the time served when response is not null
     protected int timeout;
+    protected long startTime;
+    protected long deadline;// the deadline to handle this call, if exceed we can drop it.
+
     /**
      * Chain of buffers to send as response.
      */
@@ -354,6 +354,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
       this.retryImmediatelySupported =
           connection == null? null: connection.retryImmediatelySupported;
       this.timeout = timeout;
+      this.deadline = this.timeout > 0 ? this.timestamp + this.timeout : Long.MAX_VALUE;
     }
 
     /**
@@ -400,7 +401,8 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
       return "callId: " + this.id + " service: " + serviceName +
           " methodName: " + ((this.md != null) ? this.md.getName() : "n/a") +
           " size: " + StringUtils.TraditionalBinaryPrefix.long2String(this.size, "", 1) +
-          " connection: " + connection.toString();
+          " connection: " + connection.toString() +
+          " deadline: " + deadline;
     }
 
     String toTraceString() {
@@ -411,7 +413,9 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
     }
 
     protected synchronized void setSaslTokenResponse(ByteBuffer response) {
-      this.response = new BufferChain(response);
+      ByteBuffer[] responseBufs = new ByteBuffer[1];
+      responseBufs[0] = response;
+      this.response = new BufferChain(responseBufs);
     }
 
     protected synchronized void setResponse(Object m, final CellScanner cells,
@@ -434,14 +438,14 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
         List<ByteBuffer> cellBlock = null;
         int cellBlockSize = 0;
         if (reservoir != null) {
-          this.cellBlockStream = ipcUtil.buildCellBlockStream(this.connection.codec,
+          this.cellBlockStream = cellBlockBuilder.buildCellBlockStream(this.connection.codec,
               this.connection.compressionCodec, cells, reservoir);
           if (this.cellBlockStream != null) {
             cellBlock = this.cellBlockStream.getByteBuffers();
             cellBlockSize = this.cellBlockStream.size();
           }
         } else {
-          ByteBuffer b = ipcUtil.buildCellBlock(this.connection.codec,
+          ByteBuffer b = cellBlockBuilder.buildCellBlock(this.connection.codec,
               this.connection.compressionCodec, cells);
           if (b != null) {
             cellBlockSize = b.remaining();
@@ -458,10 +462,20 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
         }
         Message header = headerBuilder.build();
         byte[] b = createHeaderAndMessageBytes(result, header, cellBlockSize);
-        List<ByteBuffer> responseBufs = new ArrayList<ByteBuffer>(
-            (cellBlock == null ? 1 : cellBlock.size()) + 1);
-        responseBufs.add(ByteBuffer.wrap(b));
-        if (cellBlock != null) responseBufs.addAll(cellBlock);
+        ByteBuffer[] responseBufs = null;
+        int cellBlockBufferSize = 0;
+        if (cellBlock != null) {
+          cellBlockBufferSize = cellBlock.size();
+          responseBufs = new ByteBuffer[1 + cellBlockBufferSize];
+        } else {
+          responseBufs = new ByteBuffer[1];
+        }
+        responseBufs[0] = ByteBuffer.wrap(b);
+        if (cellBlock != null) {
+          for (int i = 0; i < cellBlockBufferSize; i++) {
+            responseBufs[i + 1] = cellBlock.get(i);
+          }
+        }
         bc = new BufferChain(responseBufs);
         if (connection.useWrap) {
           bc = wrapWithSasl(bc);
@@ -555,9 +569,10 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
             + " as call response.");
       }
 
-      ByteBuffer bbTokenLength = ByteBuffer.wrap(Bytes.toBytes(token.length));
-      ByteBuffer bbTokenBytes = ByteBuffer.wrap(token);
-      return new BufferChain(bbTokenLength, bbTokenBytes);
+      ByteBuffer[] responseBufs = new ByteBuffer[2];
+      responseBufs[0] = ByteBuffer.wrap(Bytes.toBytes(token.length));
+      responseBufs[1] = ByteBuffer.wrap(token);
+      return new BufferChain(responseBufs);
     }
 
     @Override
@@ -598,7 +613,14 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
       responseBlockSize += blockSize;
     }
 
+    @Override
+    public long getDeadline() {
+      return deadline;
+    }
+
     public synchronized void sendResponseIfReady() throws IOException {
+      // set param null to reduce memory pressure
+      this.param = null;
       this.responder.doRespond(this);
     }
 
@@ -898,8 +920,6 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
       }
       readPool.shutdownNow();
     }
-
-    synchronized Selector getSelector() { return selector; }
 
     // The method that will return the next reader to work with
     // Simplistic implementation of round robin for now
@@ -1202,7 +1222,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
     private ByteBuffer dataLengthBuffer;
     protected final ConcurrentLinkedDeque<Call> responseQueue = new ConcurrentLinkedDeque<Call>();
     private final Lock responseWriteLock = new ReentrantLock();
-    private Counter rpcCount = new Counter(); // number of outstanding rpcs
+    private LongAdder rpcCount = new LongAdder(); // number of outstanding rpcs
     private long lastContact;
     private InetAddress addr;
     protected Socket socket;
@@ -1308,7 +1328,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
 
     /* Return true if the connection has no outstanding rpc */
     private boolean isIdle() {
-      return rpcCount.get() == 0;
+      return rpcCount.sum() == 0;
     }
 
     /* Decrement the outstanding RPC count */
@@ -1830,7 +1850,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
       }
       // Enforcing the call queue size, this triggers a retry in the client
       // This is a bit late to be doing this check - we have already read in the total request.
-      if ((totalRequestSize + callQueueSizeInBytes.get()) > maxQueueSizeInBytes) {
+      if ((totalRequestSize + callQueueSizeInBytes.sum()) > maxQueueSizeInBytes) {
         final Call callTooBig =
           new Call(id, this.service, null, null, null, null, this,
             responder, totalRequestSize, null, null, 0);
@@ -1858,10 +1878,16 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
             param = builder.build();
           }
           offset += paramSize;
+        } else {
+          // currently header must have request param, so we directly throw exception here
+          String msg = "Invalid request header: " + TextFormat.shortDebugString(header)
+              + ", should have param set in it";
+          LOG.warn(msg);
+          throw new DoNotRetryIOException(msg);
         }
         if (header.hasCellBlockMeta()) {
           buf.position(offset);
-          cellScanner = ipcUtil.createCellScannerReusingBuffers(this.codec, this.compressionCodec, buf);
+          cellScanner = cellBlockBuilder.createCellScannerReusingBuffers(this.codec, this.compressionCodec, buf);
         }
       } catch (Throwable t) {
         InetSocketAddress address = getListenerAddress();
@@ -1894,7 +1920,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
           ? new TraceInfo(header.getTraceInfo().getTraceId(), header.getTraceInfo().getParentId())
           : null;
       int timeout = 0;
-      if (header.hasTimeout()){
+      if (header.hasTimeout() && header.getTimeout() > 0){
         timeout = Math.max(minClientRequestTimeout, header.getTimeout());
       }
       Call call = new Call(id, this.service, md, header, param, cellScanner, this, responder,
@@ -2058,7 +2084,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
     this.tcpNoDelay = conf.getBoolean("hbase.ipc.server.tcpnodelay", true);
     this.tcpKeepAlive = conf.getBoolean("hbase.ipc.server.tcpkeepalive", true);
 
-    this.ipcUtil = new IPCUtil(conf);
+    this.cellBlockBuilder = new CellBlockBuilder(conf);
 
 
     // Create the responder here
@@ -2187,7 +2213,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
   public Pair<Message, CellScanner> call(BlockingService service, MethodDescriptor md,
       Message param, CellScanner cellScanner, long receiveTime, MonitoredRPCHandler status)
       throws IOException {
-    return call(service, md, param, cellScanner, receiveTime, status, 0);
+    return call(service, md, param, cellScanner, receiveTime, status, System.currentTimeMillis(),0);
   }
 
   /**
@@ -2195,10 +2221,9 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
    * the return response has protobuf response payload. On failure, the
    * exception name and the stack trace are returned in the protobuf response.
    */
-  @Override
   public Pair<Message, CellScanner> call(BlockingService service, MethodDescriptor md,
       Message param, CellScanner cellScanner, long receiveTime, MonitoredRPCHandler status,
-      int timeout)
+      long startTime, int timeout)
   throws IOException {
     try {
       status.setRPC(md.getName(), new Object[]{param}, receiveTime);
@@ -2206,8 +2231,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
       status.setRPCPacket(param);
       status.resume("Servicing call");
       //get an instance of the method arg type
-      long startTime = System.currentTimeMillis();
-      PayloadCarryingRpcController controller = new PayloadCarryingRpcController(cellScanner);
+      HBaseRpcController controller = new HBaseRpcControllerImpl(cellScanner);
       controller.setCallTimeout(timeout);
       Message result = service.callBlockingMethod(md, controller, param);
       long endTime = System.currentTimeMillis();
@@ -2679,12 +2703,12 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
     }
 
     Connection register(SocketChannel channel) {
-      Connection connection = new Connection(channel, System.currentTimeMillis());
+      Connection connection = getConnection(channel, System.currentTimeMillis());
       add(connection);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Server connection from " + connection +
             "; connections=" + size() +
-            ", queued calls size (bytes)=" + callQueueSizeInBytes.get() +
+            ", queued calls size (bytes)=" + callQueueSizeInBytes.sum() +
             ", general queued calls=" + scheduler.getGeneralQueueLength() +
             ", priority queued calls=" + scheduler.getPriorityQueueLength());
       }

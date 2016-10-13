@@ -39,6 +39,7 @@ import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.http.HttpServer;
 import org.apache.hadoop.hbase.http.InfoServer;
+import org.apache.hadoop.hbase.jetty.SslSelectChannelConnectorSecure;
 import org.apache.hadoop.hbase.rest.filter.AuthFilter;
 import org.apache.hadoop.hbase.rest.filter.RestCsrfPreventionFilter;
 import org.apache.hadoop.hbase.security.UserProvider;
@@ -51,7 +52,6 @@ import org.apache.hadoop.util.StringUtils;
 import org.mortbay.jetty.Connector;
 import org.mortbay.jetty.Server;
 import org.mortbay.jetty.nio.SelectChannelConnector;
-import org.mortbay.jetty.security.SslSelectChannelConnector;
 import org.mortbay.jetty.servlet.Context;
 import org.mortbay.jetty.servlet.FilterHolder;
 import org.mortbay.jetty.servlet.ServletHolder;
@@ -151,7 +151,7 @@ public class RESTServer implements Constants {
 
   private static void parseCommandLine(String[] args, RESTServlet servlet) {
     Options options = new Options();
-    options.addOption("p", "port", true, "Port to bind to [default: 8080]");
+    options.addOption("p", "port", true, "Port to bind to [default: " + DEFAULT_LISTEN_PORT + "]");
     options.addOption("ro", "readonly", false, "Respond only to GET HTTP " +
       "method requests [default: false]");
     options.addOption(null, "infoport", true, "Port for web UI");
@@ -252,7 +252,7 @@ public class RESTServer implements Constants {
 
     Connector connector = new SelectChannelConnector();
     if(conf.getBoolean(REST_SSL_ENABLED, false)) {
-      SslSelectChannelConnector sslConnector = new SslSelectChannelConnector();
+      SslSelectChannelConnectorSecure sslConnector = new SslSelectChannelConnectorSecure();
       String keystore = conf.get(REST_SSL_KEYSTORE_STORE);
       String password = HBaseConfiguration.getPassword(conf,
         REST_SSL_KEYSTORE_PASSWORD, null);
@@ -263,7 +263,7 @@ public class RESTServer implements Constants {
       sslConnector.setKeyPassword(keyPassword);
       connector = sslConnector;
     }
-    connector.setPort(servlet.getConfiguration().getInt("hbase.rest.port", 8080));
+    connector.setPort(servlet.getConfiguration().getInt("hbase.rest.port", DEFAULT_LISTEN_PORT));
     connector.setHost(servlet.getConfiguration().get("hbase.rest.host", "0.0.0.0"));
     connector.setHeaderBufferSize(65536);
 

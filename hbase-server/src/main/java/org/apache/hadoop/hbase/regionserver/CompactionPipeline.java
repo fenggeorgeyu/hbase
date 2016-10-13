@@ -24,7 +24,10 @@ import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.ClassSize;
 
 /**
  * The compaction pipeline of a {@link CompactingMemStore}, is a FIFO queue of segments.
@@ -39,13 +42,17 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
 public class CompactionPipeline {
   private static final Log LOG = LogFactory.getLog(CompactionPipeline.class);
 
+  public final static long FIXED_OVERHEAD = ClassSize
+      .align(ClassSize.OBJECT + (2 * ClassSize.REFERENCE) + Bytes.SIZEOF_LONG);
+  public final static long DEEP_OVERHEAD = FIXED_OVERHEAD + ClassSize.LINKEDLIST;
+  public final static long ENTRY_OVERHEAD = ClassSize.LINKEDLIST_ENTRY;
+
   private final RegionServicesForStores region;
   private LinkedList<ImmutableSegment> pipeline;
   private long version;
 
   private static final ImmutableSegment EMPTY_MEM_STORE_SEGMENT = SegmentFactory.instance()
-      .createImmutableSegment(null,
-          CompactingMemStore.DEEP_OVERHEAD_PER_PIPELINE_ITEM);
+      .createImmutableSegment((CellComparator) null);
 
   public CompactionPipeline(RegionServicesForStores region) {
     this.region = region;
@@ -105,8 +112,8 @@ public class CompactionPipeline {
     }
     if (region != null) {
       // update the global memstore size counter
-      long suffixSize = CompactingMemStore.getSegmentsSize(suffix);
-      long newSize = CompactingMemStore.getSegmentSize(segment);
+      long suffixSize = getSegmentsKeySize(suffix);
+      long newSize = segment.keySize();
       long delta = suffixSize - newSize;
       long globalMemstoreSize = region.addAndGetGlobalMemstoreSize(-delta);
       if (LOG.isDebugEnabled()) {
@@ -115,6 +122,58 @@ public class CompactionPipeline {
       }
     }
     return true;
+  }
+
+  private static long getSegmentsKeySize(List<? extends Segment> list) {
+    long res = 0;
+    for (Segment segment : list) {
+      res += segment.keySize();
+    }
+    return res;
+  }
+
+  /**
+   * If the caller holds the current version, go over the the pipeline and try to flatten each
+   * segment. Flattening is replacing the ConcurrentSkipListMap based CellSet to CellArrayMap based.
+   * Flattening of the segment that initially is not based on ConcurrentSkipListMap has no effect.
+   * Return after one segment is successfully flatten.
+   *
+   * @return true iff a segment was successfully flattened
+   */
+  public boolean flattenYoungestSegment(long requesterVersion) {
+
+    if(requesterVersion != version) {
+      LOG.warn("Segment flattening failed, because versions do not match. Requester version: "
+          + requesterVersion + ", actual version: " + version);
+      return false;
+    }
+
+    synchronized (pipeline){
+      if(requesterVersion != version) {
+        LOG.warn("Segment flattening failed, because versions do not match");
+        return false;
+      }
+
+      for (ImmutableSegment s : pipeline) {
+        // remember the old size in case this segment is going to be flatten
+        long sizeBeforeFlat = s.keySize();
+        long globalMemstoreSize = 0;
+        if (s.flatten()) {
+          if(region != null) {
+            long sizeAfterFlat = s.keySize();
+            long delta = sizeBeforeFlat - sizeAfterFlat;
+            globalMemstoreSize = region.addAndGetGlobalMemstoreSize(-delta);
+          }
+          LOG.debug("Compaction pipeline segment " + s + " was flattened; globalMemstoreSize: "
+              + globalMemstoreSize);
+          return true;
+        }
+      }
+
+    }
+    // do not update the global memstore size counter and do not increase the version,
+    // because all the cells remain in place
+    return false;
   }
 
   public boolean isEmpty() {
@@ -134,20 +193,20 @@ public class CompactionPipeline {
 
   public long getMinSequenceId() {
     long minSequenceId = Long.MAX_VALUE;
-    if(!isEmpty()) {
+    if (!isEmpty()) {
       minSequenceId = pipeline.getLast().getMinSequenceId();
     }
     return minSequenceId;
   }
 
   public long getTailSize() {
-    if(isEmpty()) return 0;
-    return CompactingMemStore.getSegmentSize(pipeline.peekLast());
+    if (isEmpty()) return 0;
+    return pipeline.peekLast().keySize();
   }
 
   private void swapSuffix(LinkedList<ImmutableSegment> suffix, ImmutableSegment segment) {
     version++;
-    for(Segment itemInSuffix : suffix) {
+    for (Segment itemInSuffix : suffix) {
       itemInSuffix.close();
     }
     pipeline.removeAll(suffix);
@@ -170,7 +229,6 @@ public class CompactionPipeline {
       // empty suffix is always valid
       return true;
     }
-
     Iterator<ImmutableSegment> pipelineBackwardIterator = pipeline.descendingIterator();
     Iterator<ImmutableSegment> suffixBackwardIterator = suffix.descendingIterator();
     ImmutableSegment suffixCurrent;

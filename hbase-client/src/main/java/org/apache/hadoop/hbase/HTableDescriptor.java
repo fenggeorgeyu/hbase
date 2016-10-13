@@ -40,8 +40,8 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.TableSchema;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.TableSchema;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 
@@ -1112,6 +1112,18 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    */
   public Collection<HColumnDescriptor> getFamilies() {
     return Collections.unmodifiableCollection(this.families.values());
+  }
+
+  /**
+   * Return true if there are at least one cf whose replication scope is serial.
+   */
+  public boolean hasSerialReplicationScope() {
+    for (HColumnDescriptor column: getFamilies()){
+      if (column.getScope() == HConstants.REPLICATION_SCOPE_SERIAL){
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

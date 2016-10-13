@@ -18,16 +18,22 @@
 package org.apache.hadoop.hbase.client;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
+import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.mockito.Mockito;
 
@@ -121,7 +127,8 @@ public class HConnectionTestingUtility {
     Mockito.when(c.getNonceGenerator()).thenReturn(ng);
     Mockito.when(c.getAsyncProcess()).thenReturn(
       new AsyncProcess(c, conf, null, RpcRetryingCallerFactory.instantiate(conf), false,
-          RpcControllerFactory.instantiate(conf)));
+          RpcControllerFactory.instantiate(conf), conf.getInt(HConstants.HBASE_RPC_TIMEOUT_KEY,
+              HConstants.DEFAULT_HBASE_RPC_TIMEOUT)));
     Mockito.when(c.getNewRpcRetryingCallerFactory(conf)).thenReturn(
         RpcRetryingCallerFactory.instantiate(conf,
             RetryingCallerInterceptorFactory.NO_OP_INTERCEPTOR, null));
@@ -149,5 +156,44 @@ public class HConnectionTestingUtility {
     ConnectionImplementation connection =
       Mockito.spy(new ConnectionImplementation(conf, null, null));
     return connection;
+  }
+
+  /**
+   * This coproceesor sleep 2s at first increment/append rpc call.
+   */
+  public static class SleepAtFirstRpcCall extends BaseRegionObserver {
+    static final AtomicLong ct = new AtomicLong(0);
+    static final String SLEEP_TIME_CONF_KEY =
+        "hbase.coprocessor.SleepAtFirstRpcCall.sleepTime";
+    static final long DEFAULT_SLEEP_TIME = 2000;
+    static final AtomicLong sleepTime = new AtomicLong(DEFAULT_SLEEP_TIME);
+
+    public SleepAtFirstRpcCall() {
+    }
+
+    @Override
+    public void postOpen(ObserverContext<RegionCoprocessorEnvironment> c) {
+      RegionCoprocessorEnvironment env = c.getEnvironment();
+      Configuration conf = env.getConfiguration();
+      sleepTime.set(conf.getLong(SLEEP_TIME_CONF_KEY, DEFAULT_SLEEP_TIME));
+    }
+
+    @Override
+    public Result postIncrement(final ObserverContext<RegionCoprocessorEnvironment> e,
+        final Increment increment, final Result result) throws IOException {
+      if (ct.incrementAndGet() == 1) {
+        Threads.sleep(sleepTime.get());
+      }
+      return result;
+    }
+
+    @Override
+    public Result postAppend(final ObserverContext<RegionCoprocessorEnvironment> e,
+        final Append append, final Result result) throws IOException {
+      if (ct.incrementAndGet() == 1) {
+        Threads.sleep(sleepTime.get());
+      }
+      return result;
+    }
   }
 }

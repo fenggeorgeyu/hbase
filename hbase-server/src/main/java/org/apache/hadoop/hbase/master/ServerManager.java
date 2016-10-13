@@ -49,36 +49,40 @@ import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.RetriesExhaustedException;
-import org.apache.hadoop.hbase.ipc.PayloadCarryingRpcController;
+import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.master.balancer.BaseLoadBalancer;
+import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.procedure.ServerCrashProcedure;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.RequestConverter;
-import org.apache.hadoop.hbase.protobuf.ResponseConverter;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.OpenRegionRequest;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.OpenRegionResponse;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.ServerInfo;
-import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionServerStartupRequest;
-import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
-import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
+import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
+import org.apache.hadoop.hbase.shaded.protobuf.ResponseConverter;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ServerInfo;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.RegionOpeningState;
+import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.hadoop.hbase.util.RetryCounterFactory;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
-import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.zookeeper.KeeperException;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.ByteString;
-import com.google.protobuf.ServiceException;
+
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
 
 /**
  * The ServerManager class manages info about region servers.
@@ -135,8 +139,8 @@ public class ServerManager {
     new ConcurrentSkipListMap<byte[], ConcurrentNavigableMap<byte[], Long>>(Bytes.BYTES_COMPARATOR);
 
   /** Map of registered servers to their current load */
-  private final ConcurrentHashMap<ServerName, ServerLoad> onlineServers =
-    new ConcurrentHashMap<ServerName, ServerLoad>();
+  private final ConcurrentNavigableMap<ServerName, ServerLoad> onlineServers =
+    new ConcurrentSkipListMap<ServerName, ServerLoad>();
 
   /**
    * Map of admin interfaces per registered regionserver; these interfaces we use to control
@@ -439,8 +443,14 @@ public class ServerManager {
    */
   private ServerName findServerWithSameHostnamePortWithLock(
       final ServerName serverName) {
-    for (ServerName sn: this.onlineServers.keySet()) {
-      if (ServerName.isSameHostnameAndPort(serverName, sn)) return sn;
+    ServerName end = ServerName.valueOf(serverName.getHostname(), serverName.getPort(),
+        Long.MAX_VALUE);
+
+    ServerName r = onlineServers.lowerKey(end);
+    if (r != null) {
+      if (ServerName.isSameHostnameAndPort(r, serverName)) {
+        return r;
+      }
     }
     return null;
   }
@@ -448,8 +458,7 @@ public class ServerManager {
   /**
    * Adds the onlineServers list. onlineServers should be locked.
    * @param serverName The remote servers name.
-   * @param sl
-   * @return Server load from the removed server, if any.
+   * @param s
    */
   @VisibleForTesting
   void recordNewServerWithLock(final ServerName serverName, final ServerLoad sl) {
@@ -467,7 +476,7 @@ public class ServerManager {
     if (storeFlushedSequenceId != null) {
       for (Map.Entry<byte[], Long> entry : storeFlushedSequenceId.entrySet()) {
         builder.addStoreSequenceId(StoreSequenceId.newBuilder()
-            .setFamilyName(ByteString.copyFrom(entry.getKey()))
+            .setFamilyName(UnsafeByteOperations.unsafeWrap(entry.getKey()))
             .setSequenceId(entry.getValue().longValue()).build());
       }
     }
@@ -556,7 +565,7 @@ public class ServerManager {
       }
 
       try {
-        List<String> servers = ZKUtil.listChildrenNoWatch(zkw, zkw.rsZNode);
+        List<String> servers = ZKUtil.listChildrenNoWatch(zkw, zkw.znodePaths.rsZNode);
         if (servers == null || servers.size() == 0 || (servers.size() == 1
             && servers.contains(sn.toString()))) {
           LOG.info("ZK shows there is only the master self online, exiting now");
@@ -615,8 +624,9 @@ public class ServerManager {
     }
 
     boolean carryingMeta = master.getAssignmentManager().isCarryingMeta(serverName);
-    this.master.getMasterProcedureExecutor().
-      submitProcedure(new ServerCrashProcedure(serverName, true, carryingMeta));
+    ProcedureExecutor<MasterProcedureEnv> procExec = this.master.getMasterProcedureExecutor();
+    procExec.submitProcedure(new ServerCrashProcedure(
+      procExec.getEnvironment(), serverName, true, carryingMeta));
     LOG.debug("Added=" + serverName +
       " to dead servers, submitted shutdown handler to be executed meta=" + carryingMeta);
 
@@ -659,8 +669,9 @@ public class ServerManager {
     }
 
     this.deadservers.add(serverName);
-    this.master.getMasterProcedureExecutor().
-    submitProcedure(new ServerCrashProcedure(serverName, shouldSplitWal, false));
+    ProcedureExecutor<MasterProcedureEnv> procExec = this.master.getMasterProcedureExecutor();
+    procExec.submitProcedure(new ServerCrashProcedure(
+      procExec.getEnvironment(), serverName, shouldSplitWal, false));
   }
 
   /**
@@ -784,7 +795,7 @@ public class ServerManager {
     }
   }
 
-  private PayloadCarryingRpcController newRpcController() {
+  private HBaseRpcController newRpcController() {
     return rpcControllerFactory == null ? null : rpcControllerFactory.newController();
   }
 
@@ -808,7 +819,7 @@ public class ServerManager {
         region.getRegionNameAsString() +
         " failed because no RPC connection found to this server");
     }
-    PayloadCarryingRpcController controller = newRpcController();
+    HBaseRpcController controller = newRpcController();
     return ProtobufUtil.closeRegion(controller, admin, server, region.getRegionName(), dest);
   }
 
@@ -830,7 +841,7 @@ public class ServerManager {
     if (server == null) return;
     try {
       AdminService.BlockingInterface admin = getRsAdmin(server);
-      PayloadCarryingRpcController controller = newRpcController();
+      HBaseRpcController controller = newRpcController();
       ProtobufUtil.warmupRegion(controller, admin, region);
     } catch (IOException e) {
       LOG.error("Received exception in RPC for warmup server:" +
@@ -846,7 +857,7 @@ public class ServerManager {
   public static void closeRegionSilentlyAndWait(ClusterConnection connection,
     ServerName server, HRegionInfo region, long timeout) throws IOException, InterruptedException {
     AdminService.BlockingInterface rs = connection.getAdmin(server);
-    PayloadCarryingRpcController controller = connection.getRpcControllerFactory().newController();
+    HBaseRpcController controller = connection.getRpcControllerFactory().newController();
     try {
       ProtobufUtil.closeRegion(controller, rs, server, region.getRegionName());
     } catch (IOException e) {
@@ -854,6 +865,7 @@ public class ServerManager {
     }
     long expiration = timeout + System.currentTimeMillis();
     while (System.currentTimeMillis() < expiration) {
+      controller.reset();
       try {
         HRegionInfo rsRegion =
           ProtobufUtil.getRegionInfo(controller, rs, region.getRegionName());
@@ -884,7 +896,7 @@ public class ServerManager {
    * @throws IOException
    */
   public void sendRegionsMerge(ServerName server, HRegionInfo region_a,
-      HRegionInfo region_b, boolean forcible, final UserGroupInformation user) throws IOException {
+      HRegionInfo region_b, boolean forcible, final User user) throws IOException {
     if (server == null)
       throw new NullPointerException("Passed server is null");
     if (region_a == null || region_b == null)
@@ -897,7 +909,7 @@ public class ServerManager {
           + region_b.getRegionNameAsString()
           + " failed because no RPC connection found to this server");
     }
-    PayloadCarryingRpcController controller = newRpcController();
+    HBaseRpcController controller = newRpcController();
     ProtobufUtil.mergeRegions(controller, admin, region_a, region_b, forcible, user);
   }
 
@@ -911,7 +923,7 @@ public class ServerManager {
     RetryCounter retryCounter = pingRetryCounterFactory.create();
     while (retryCounter.shouldRetry()) {
       try {
-        PayloadCarryingRpcController controller = newRpcController();
+        HBaseRpcController controller = newRpcController();
         AdminService.BlockingInterface admin = getRsAdmin(server);
         if (admin != null) {
           ServerInfo info = ProtobufUtil.getServerInfo(controller, admin);
@@ -1172,6 +1184,24 @@ public class ServerManager {
   void clearDeadServersWithSameHostNameAndPortOfOnlineServer() {
     for (ServerName serverName : getOnlineServersList()) {
       deadservers.cleanAllPreviousInstances(serverName);
+    }
+  }
+
+  /**
+   * Called by delete table and similar to notify the ServerManager that a region was removed.
+   */
+  public void removeRegion(final HRegionInfo regionInfo) {
+    final byte[] encodedName = regionInfo.getEncodedNameAsBytes();
+    storeFlushedSequenceIdsByRegion.remove(encodedName);
+    flushedSequenceIdByRegion.remove(encodedName);
+  }
+
+  /**
+   * Called by delete table and similar to notify the ServerManager that a region was removed.
+   */
+  public void removeRegions(final List<HRegionInfo> regions) {
+    for (HRegionInfo hri: regions) {
+      removeRegion(hri);
     }
   }
 }

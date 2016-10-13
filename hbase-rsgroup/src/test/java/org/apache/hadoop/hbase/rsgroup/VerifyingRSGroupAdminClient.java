@@ -24,6 +24,7 @@ import com.google.common.collect.Sets;
 import com.google.common.net.HostAndPort;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
@@ -42,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+@InterfaceAudience.Private
 public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
   private Table table;
   private ZooKeeperWatcher zkw;
@@ -115,19 +117,19 @@ public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
               result.getValue(
                   RSGroupInfoManager.META_FAMILY_BYTES,
                   RSGroupInfoManager.META_QUALIFIER_BYTES));
-      groupMap.put(proto.getName(), ProtobufUtil.toGroupInfo(proto));
+      groupMap.put(proto.getName(), RSGroupSerDe.toGroupInfo(proto));
     }
     Assert.assertEquals(Sets.newHashSet(groupMap.values()),
         Sets.newHashSet(wrapped.listRSGroups()));
     try {
-      String groupBasePath = ZKUtil.joinZNode(zkw.baseZNode, "rsgroup");
+      String groupBasePath = ZKUtil.joinZNode(zkw.znodePaths.baseZNode, "rsgroup");
       for(String znode: ZKUtil.listChildrenNoWatch(zkw, groupBasePath)) {
         byte[] data = ZKUtil.getData(zkw, ZKUtil.joinZNode(groupBasePath, znode));
         if(data.length > 0) {
           ProtobufUtil.expectPBMagicPrefix(data);
           ByteArrayInputStream bis = new ByteArrayInputStream(
               data, ProtobufUtil.lengthOfPBMagic(), data.length);
-          zList.add(ProtobufUtil.toGroupInfo(RSGroupProtos.RSGroupInfo.parseFrom(bis)));
+          zList.add(RSGroupSerDe.toGroupInfo(RSGroupProtos.RSGroupInfo.parseFrom(bis)));
         }
       }
       Assert.assertEquals(zList.size(), groupMap.size());

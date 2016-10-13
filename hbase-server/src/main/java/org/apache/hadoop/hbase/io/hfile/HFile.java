@@ -34,11 +34,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.LongAdder;
 
-import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -49,18 +48,21 @@ import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.protobuf.ProtobufMagic;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.BytesBytesPair;
-import org.apache.hadoop.hbase.protobuf.generated.HFileProtos;
+import org.apache.hadoop.hbase.regionserver.CellSink;
+import org.apache.hadoop.hbase.regionserver.ShipperListener;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.BytesBytesPair;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HFileProtos;
 import org.apache.hadoop.hbase.util.BloomFilterWriter;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.Counter;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.io.Writable;
 
@@ -180,30 +182,26 @@ public class HFile {
   public static final int DEFAULT_BYTES_PER_CHECKSUM = 16 * 1024;
 
   // For measuring number of checksum failures
-  static final Counter CHECKSUM_FAILURES = new Counter();
+  static final LongAdder CHECKSUM_FAILURES = new LongAdder();
 
   // For tests. Gets incremented when we read a block whether from HDFS or from Cache.
-  public static final Counter DATABLOCK_READ_COUNT = new Counter();
+  public static final LongAdder DATABLOCK_READ_COUNT = new LongAdder();
 
   /**
    * Number of checksum verification failures. It also
    * clears the counter.
    */
   public static final long getChecksumFailuresCount() {
-    long count = CHECKSUM_FAILURES.get();
-    CHECKSUM_FAILURES.set(0);
-    return count;
+    return CHECKSUM_FAILURES.sumThenReset();
   }
 
   /** API required to write an {@link HFile} */
-  public interface Writer extends Closeable {
+  public interface Writer extends Closeable, CellSink, ShipperListener {
     /** Max memstore (mvcc) timestamp in FileInfo */
     public static final byte [] MAX_MEMSTORE_TS_KEY = Bytes.toBytes("MAX_MEMSTORE_TS_KEY");
 
     /** Add an element to the file info map. */
     void appendFileInfo(byte[] key, byte[] value) throws IOException;
-
-    void append(Cell cell) throws IOException;
 
     /** @return the path to this {@link HFile} */
     Path getPath();
@@ -748,8 +746,8 @@ public class HFile {
       HFileProtos.FileInfoProto.Builder builder = HFileProtos.FileInfoProto.newBuilder();
       for (Map.Entry<byte [], byte[]> e: this.map.entrySet()) {
         HBaseProtos.BytesBytesPair.Builder bbpBuilder = HBaseProtos.BytesBytesPair.newBuilder();
-        bbpBuilder.setFirst(ByteStringer.wrap(e.getKey()));
-        bbpBuilder.setSecond(ByteStringer.wrap(e.getValue()));
+        bbpBuilder.setFirst(UnsafeByteOperations.unsafeWrap(e.getKey()));
+        bbpBuilder.setSecond(UnsafeByteOperations.unsafeWrap(e.getValue()));
         builder.addMapEntry(bbpBuilder.build());
       }
       out.write(ProtobufMagic.PB_MAGIC);

@@ -70,13 +70,6 @@ possible configurations would overwhelm and obscure the important.
     </description>
   </property>
   <property >
-    <name>hbase.bulkload.staging.dir</name>
-    <value>${hbase.fs.tmp.dir}</value>
-    <description>A staging directory in default file system (HDFS)
-    for bulk loading.
-    </description>
-  </property>
-  <property >
     <name>hbase.cluster.distributed</name>
     <value>false</value>
     <description>The mode the cluster will be in. Possible values are
@@ -398,16 +391,6 @@ possible configurations would overwhelm and obscure the important.
     for more information.</description>
   </property>
   <!-- End of properties used to generate ZooKeeper host:port quorum list. -->
-  <property>
-    <name>hbase.zookeeper.useMulti</name>
-    <value>true</value>
-    <description>Instructs HBase to make use of ZooKeeper's multi-update functionality.
-    This allows certain ZooKeeper operations to complete more quickly and prevents some issues
-    with rare Replication failure scenarios (see the release note of HBASE-2611 for an example).
-    IMPORTANT: only set this to true if all ZooKeeper servers in the cluster are on version 3.4+
-    and will not be downgraded.  ZooKeeper versions before 3.4 do not support multi-update and
-    will not fail gracefully if multi-update is invoked (see ZOOKEEPER-1495).</description>
-  </property>
 
   <!--
   Beginning of properties that are directly mapped from ZooKeeper's zoo.cfg.
@@ -487,22 +470,32 @@ possible configurations would overwhelm and obscure the important.
   <property>
     <name>hbase.client.max.total.tasks</name>
     <value>100</value>
-    <description>The maximum number of concurrent tasks a single HTable instance will
+    <description>The maximum number of concurrent mutation tasks a single HTable instance will
     send to the cluster.</description>
   </property>
   <property>
     <name>hbase.client.max.perserver.tasks</name>
     <value>5</value>
-    <description>The maximum number of concurrent tasks a single HTable instance will
+    <description>The maximum number of concurrent mutation tasks a single HTable instance will
     send to a single region server.</description>
   </property>
   <property>
     <name>hbase.client.max.perregion.tasks</name>
     <value>1</value>
-    <description>The maximum number of concurrent connections the client will
+    <description>The maximum number of concurrent mutation tasks the client will
     maintain to a single Region. That is, if there is already
     hbase.client.max.perregion.tasks writes in progress for this region, new puts
     won't be sent to this region until some writes finishes.</description>
+  </property>
+  <property>
+    <name>hbase.client.perserver.requests.threshold</name>
+    <value>2147483647</value>
+    <description>The max number of concurrent pending requests for one server in all client threads
+    (process level). Exceeding requests will be thrown ServerTooBusyException immediately to prevent
+    user's threads being occupied and blocked by only one slow region server. If you use a fix
+    number of threads to access HBase in a synchronous way, set this to a suitable value which is
+    related to the number of threads will help you. See
+    https://issues.apache.org/jira/browse/HBASE-16388 for details.</description>
   </property>
   <property>
     <name>hbase.client.scanner.caching</name>
@@ -1190,7 +1183,7 @@ possible configurations would overwhelm and obscure the important.
   <property>
     <name>hbase.rootdir.perms</name>
     <value>700</value>
-    <description>FS Permissions for the root directory in a secure (kerberos) setup.
+    <description>FS Permissions for the root data subdirectory in a secure (kerberos) setup.
     When master starts, it creates the rootdir with this permissions or sets the permissions
     if it does not match.</description>
   </property>
@@ -1569,6 +1562,20 @@ possible configurations would overwhelm and obscure the important.
         chunks each replication batch is broken into.
         Larger values can improve the replication throughput between the master and
         slave clusters. The default of 10 will rarely need to be changed.
+    </description>
+  </property>
+  <property>
+    <name>hbase.serial.replication.waitingMs</name>
+    <value>10000</value>
+    <description>
+      By default, in replication we can not make sure the order of operations in slave cluster is
+      same as the order in master. If set REPLICATION_SCOPE to 2, we will push edits by the order
+      of written. This configure is to set how long (in ms) we will wait before next checking if a
+      log can not push right now because there are some logs written before it have not been pushed.
+      A larger waiting will decrease the number of queries on hbase:meta but will enlarge the delay
+      of replication. This feature relies on zk-less assignment, and conflicts with distributed log
+      replay. So users must set hbase.assignment.usezk and hbase.master.distributed.log.replay to
+      false to support it.
     </description>
   </property>
   <!-- Static Web User Filter properties. -->

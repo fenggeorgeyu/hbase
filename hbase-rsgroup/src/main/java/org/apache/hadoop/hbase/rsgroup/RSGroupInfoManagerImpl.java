@@ -22,7 +22,6 @@ package org.apache.hadoop.hbase.rsgroup;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import com.google.common.collect.Sets;
 import com.google.common.net.HostAndPort;
 import com.google.protobuf.ServiceException;
@@ -53,10 +52,12 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
+import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.MetaTableAccessor.DefaultVisitorBase;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
@@ -71,18 +72,15 @@ import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.ServerListener;
 import org.apache.hadoop.hbase.master.TableStateManager;
-import org.apache.hadoop.hbase.master.procedure.CreateTableProcedure;
-import org.apache.hadoop.hbase.master.procedure.ProcedurePrepareLatch;
 import org.apache.hadoop.hbase.protobuf.ProtobufMagic;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.RequestConverter;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos;
 import org.apache.hadoop.hbase.protobuf.generated.RSGroupProtos;
 import org.apache.hadoop.hbase.regionserver.DisabledRegionSplitPolicy;
 import org.apache.hadoop.hbase.security.access.AccessControlLists;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.ModifyRegionUtils;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.zookeeper.KeeperException;
@@ -93,6 +91,7 @@ import org.apache.zookeeper.KeeperException;
  * It also makes use of zookeeper to store group information needed
  * for bootstrapping during offline mode.
  */
+@InterfaceAudience.Private
 public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListener {
   private static final Log LOG = LogFactory.getLog(RSGroupInfoManagerImpl.class);
 
@@ -122,6 +121,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
   private volatile Set<String> prevRSGroups;
   private RSGroupSerDe rsGroupSerDe;
   private DefaultServerUpdater defaultServerUpdater;
+  private boolean isInit = false;
 
 
   public RSGroupInfoManagerImpl(MasterServices master) throws IOException {
@@ -131,13 +131,21 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
     this.master = master;
     this.watcher = master.getZooKeeper();
     this.conn = master.getClusterConnection();
-    rsGroupStartupWorker = new RSGroupStartupWorker(this, master, conn);
     prevRSGroups = new HashSet<String>();
+  }
+
+  public void init() throws IOException{
+    rsGroupStartupWorker = new RSGroupStartupWorker(this, master, conn);
     refresh();
     rsGroupStartupWorker.start();
     defaultServerUpdater = new DefaultServerUpdater(this);
     master.getServerManager().registerListener(this);
     defaultServerUpdater.start();
+    isInit = true;
+  }
+
+  boolean isInit() {
+    return isInit;
   }
 
   /**
@@ -229,7 +237,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
     Map<String,RSGroupInfo> newGroupMap = Maps.newHashMap(rsGroupMap);
     for(TableName tableName: tableNames) {
       if (tableMap.containsKey(tableName)) {
-        RSGroupInfo src = new RSGroupInfo(rsGroupMap.get(tableMap.get(tableName)));
+        RSGroupInfo src = new RSGroupInfo(newGroupMap.get(tableMap.get(tableName)));
         src.removeTable(tableName);
         newGroupMap.put(src.getName(), src);
       }
@@ -289,7 +297,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
       groupList.addAll(rsGroupSerDe.retrieveGroupList(rsGroupTable));
     } else {
       LOG.debug("Refershing in Offline mode.");
-      String groupBasePath = ZKUtil.joinZNode(watcher.baseZNode, rsGroupZNode);
+      String groupBasePath = ZKUtil.joinZNode(watcher.znodePaths.baseZNode, rsGroupZNode);
       groupList.addAll(rsGroupSerDe.retrieveGroupList(watcher, groupBasePath));
     }
 
@@ -359,7 +367,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
 
     // populate puts
     for(RSGroupInfo RSGroupInfo : newGroupMap.values()) {
-      RSGroupProtos.RSGroupInfo proto = ProtobufUtil.toProtoGroupInfo(RSGroupInfo);
+      RSGroupProtos.RSGroupInfo proto = RSGroupSerDe.toProtoGroupInfo(RSGroupInfo);
       Put p = new Put(Bytes.toBytes(RSGroupInfo.getName()));
       p.addColumn(META_FAMILY_BYTES,
           META_QUALIFIER_BYTES,
@@ -403,7 +411,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
 
 
     try {
-      String groupBasePath = ZKUtil.joinZNode(watcher.baseZNode, rsGroupZNode);
+      String groupBasePath = ZKUtil.joinZNode(watcher.znodePaths.baseZNode, rsGroupZNode);
       ZKUtil.createAndFailSilent(watcher, groupBasePath, ProtobufMagic.PB_MAGIC);
 
       List<ZKUtil.ZKUtilOp> zkOps = new ArrayList<ZKUtil.ZKUtilOp>(newGroupMap.size());
@@ -417,7 +425,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
 
       for(RSGroupInfo RSGroupInfo : newGroupMap.values()) {
         String znode = ZKUtil.joinZNode(groupBasePath, RSGroupInfo.getName());
-        RSGroupProtos.RSGroupInfo proto = ProtobufUtil.toProtoGroupInfo(RSGroupInfo);
+        RSGroupProtos.RSGroupInfo proto = RSGroupSerDe.toProtoGroupInfo(RSGroupInfo);
         LOG.debug("Updating znode: "+znode);
         ZKUtil.createAndFailSilent(watcher, znode);
         zkOps.add(ZKUtil.ZKUtilOp.deleteNodeFailSilent(znode));
@@ -444,7 +452,7 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
     try {
       LOG.debug("Reading online RS from zookeeper");
       List<ServerName> servers = new LinkedList<ServerName>();
-      for (String el: ZKUtil.listChildrenNoWatch(watcher, watcher.rsZNode)) {
+      for (String el: ZKUtil.listChildrenNoWatch(watcher, watcher.znodePaths.rsZNode)) {
         servers.add(ServerName.parseServerName(el));
       }
       return servers;
@@ -669,6 +677,8 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
             //flush any inconsistencies between ZK and HTable
             groupInfoManager.flushConfig(groupInfoManager.rsGroupMap);
           }
+        } catch (RuntimeException e) {
+          throw e;
         } catch(Exception e) {
           found.set(false);
           LOG.warn("Failed to perform check", e);
@@ -692,22 +702,12 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
   }
 
   private void createGroupTable(MasterServices masterServices) throws IOException {
-    HRegionInfo[] newRegions =
-        ModifyRegionUtils.createHRegionInfos(RSGROUP_TABLE_DESC, null);
-    ProcedurePrepareLatch latch = ProcedurePrepareLatch.createLatch();
-    masterServices.getMasterProcedureExecutor().submitProcedure(
-        new CreateTableProcedure(
-            masterServices.getMasterProcedureExecutor().getEnvironment(),
-            RSGROUP_TABLE_DESC,
-            newRegions,
-            latch),
-        HConstants.NO_NONCE,
-        HConstants.NO_NONCE);
-    latch.await();
+    Long procId = masterServices.createSystemTable(RSGROUP_TABLE_DESC);
     // wait for region to be online
     int tries = 600;
-    while(masterServices.getAssignmentManager().getRegionStates()
-        .getRegionServerOfRegion(newRegions[0]) == null && tries > 0) {
+    while (!(masterServices.getMasterProcedureExecutor().isFinished(procId))
+        && masterServices.getMasterProcedureExecutor().isRunning()
+        && tries > 0) {
       try {
         Thread.sleep(100);
       } catch (InterruptedException e) {
@@ -716,7 +716,12 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
       tries--;
     }
     if(tries <= 0) {
-      throw new IOException("Failed to create group table.");
+      throw new IOException("Failed to create group table in a given time.");
+    } else {
+      ProcedureInfo result = masterServices.getMasterProcedureExecutor().getResult(procId);
+      if (result != null && result.isFailed()) {
+        throw new IOException("Failed to create group table. " + result.getExceptionFullMessage());
+      }
     }
   }
 
@@ -727,11 +732,14 @@ public class RSGroupInfoManagerImpl implements RSGroupInfoManager, ServerListene
       = MultiRowMutationProtos.MutateRowsRequest.newBuilder();
     for (Mutation mutation : mutations) {
       if (mutation instanceof Put) {
-        mmrBuilder.addMutationRequest(ProtobufUtil.toMutation(
-          ClientProtos.MutationProto.MutationType.PUT, mutation));
+        mmrBuilder.addMutationRequest(org.apache.hadoop.hbase.protobuf.ProtobufUtil.toMutation(
+            org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.MutationType.PUT,
+            mutation));
       } else if (mutation instanceof Delete) {
-        mmrBuilder.addMutationRequest(ProtobufUtil.toMutation(
-          ClientProtos.MutationProto.MutationType.DELETE, mutation));
+        mmrBuilder.addMutationRequest(
+            org.apache.hadoop.hbase.protobuf.ProtobufUtil.toMutation(
+                org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.
+                  MutationType.DELETE, mutation));
       } else {
         throw new DoNotRetryIOException("multiMutate doesn't support "
           + mutation.getClass().getName());

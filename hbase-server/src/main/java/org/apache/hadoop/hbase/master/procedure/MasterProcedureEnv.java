@@ -31,12 +31,12 @@ import org.apache.hadoop.hbase.ipc.RpcServer;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
 import org.apache.hadoop.hbase.master.MasterServices;
-import org.apache.hadoop.hbase.master.procedure.MasterProcedureScheduler.ProcedureEvent;
 import org.apache.hadoop.hbase.procedure2.Procedure;
+import org.apache.hadoop.hbase.procedure2.ProcedureEvent;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
 import org.apache.hadoop.hbase.security.User;
-import org.apache.hadoop.hbase.security.UserProvider;
+import org.apache.hadoop.hbase.security.Superusers;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
 import org.apache.hadoop.hbase.util.FSUtils;
 
@@ -61,9 +61,14 @@ public class MasterProcedureEnv {
         @Override
         public boolean progress() {
           LOG.debug("Recover Procedure Store log lease: " + path);
-          return master.isActiveMaster();
+          return isRunning();
         }
       });
+    }
+
+    private boolean isRunning() {
+      return master.isActiveMaster() && !master.isStopped() &&
+        !master.isStopping() && !master.isAborted();
     }
   }
 
@@ -96,10 +101,10 @@ public class MasterProcedureEnv {
       master.getTableLockManager());
   }
 
-  public User getRequestUser() throws IOException {
+  public User getRequestUser() {
     User user = RpcServer.getRequestUser();
     if (user == null) {
-      user = UserProvider.instantiate(getMasterConfiguration()).getCurrent();
+      user = Superusers.getSystemUser();
     }
     return user;
   }
@@ -116,7 +121,12 @@ public class MasterProcedureEnv {
     return master.getMasterCoprocessorHost();
   }
 
+  @Deprecated
   public MasterProcedureScheduler getProcedureQueue() {
+    return procSched;
+  }
+
+  public MasterProcedureScheduler getProcedureScheduler() {
     return procSched;
   }
 
@@ -137,18 +147,18 @@ public class MasterProcedureEnv {
   }
 
   public void wake(ProcedureEvent event) {
-    procSched.wake(event);
+    procSched.wakeEvent(event);
   }
 
   public void suspend(ProcedureEvent event) {
-    procSched.suspend(event);
+    procSched.suspendEvent(event);
   }
 
   public void setEventReady(ProcedureEvent event, boolean isReady) {
     if (isReady) {
-      procSched.wake(event);
+      procSched.wakeEvent(event);
     } else {
-      procSched.suspend(event);
+      procSched.suspendEvent(event);
     }
   }
 }

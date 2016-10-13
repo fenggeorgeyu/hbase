@@ -23,11 +23,15 @@ module Shell
     class SetPeerTableCFs< Command
       def help
         return <<-EOF
-  Set the replicable table-cf config for the specified peer
+  Set the replicable table-cf config for the specified peer.
+
+  Can't set a table to table-cfs config if it's namespace already was in
+  namespaces config of this peer.
+
   Examples:
 
-    # set all tables to be replicable for a peer
-    hbase> set_peer_tableCFs '1', ""
+    # set table-cfs config is null, then the namespaces config decide which
+    # table to be replicated.
     hbase> set_peer_tableCFs '1'
     # set table / table-cf to be replicable for a peer, for a table without
     # an explicit column-family list, all replicable column-families (with

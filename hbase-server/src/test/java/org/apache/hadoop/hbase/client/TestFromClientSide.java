@@ -26,20 +26,23 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.NavigableSet;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.lang.ArrayUtils;
@@ -62,8 +65,11 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.client.metrics.ScanMetrics;
+import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.coprocessor.MultiRowMutationEndpoint;
+import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.CompareFilter;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
@@ -83,25 +89,24 @@ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.io.hfile.BlockCache;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
-import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.MutationType;
 import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos.MultiRowMutationService;
 import org.apache.hadoop.hbase.protobuf.generated.MultiRowMutationProtos.MutateRowsRequest;
+import org.apache.hadoop.hbase.regionserver.DelegatingKeyValueScanner;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
 import org.apache.hadoop.hbase.regionserver.NoSuchColumnFamilyException;
 import org.apache.hadoop.hbase.regionserver.Region;
+import org.apache.hadoop.hbase.regionserver.ScanInfo;
 import org.apache.hadoop.hbase.regionserver.Store;
+import org.apache.hadoop.hbase.regionserver.StoreScanner;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.log4j.AppenderSkeleton;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
-import org.apache.log4j.spi.LoggingEvent;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -166,6 +171,50 @@ public class TestFromClientSide {
   @After
   public void tearDown() throws Exception {
     // Nothing to do.
+  }
+
+  /**
+   * Test append result when there are duplicate rpc request.
+   */
+  @Test
+  public void testDuplicateAppend() throws Exception {
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testDuplicateAppend");
+    Map<String, String> kvs = new HashMap<String, String>();
+    kvs.put(HConnectionTestingUtility.SleepAtFirstRpcCall.SLEEP_TIME_CONF_KEY, "2000");
+    hdt.addCoprocessor(HConnectionTestingUtility.SleepAtFirstRpcCall.class.getName(), null, 1, kvs);
+    TEST_UTIL.createTable(hdt, new byte[][] { ROW }).close();
+
+    Configuration c = new Configuration(TEST_UTIL.getConfiguration());
+    c.setInt(HConstants.HBASE_CLIENT_PAUSE, 50);
+    // Client will retry beacuse rpc timeout is small than the sleep time of first rpc call
+    c.setInt(HConstants.HBASE_RPC_TIMEOUT_KEY, 1500);
+
+    Connection connection = ConnectionFactory.createConnection(c);
+    Table t = connection.getTable(TableName.valueOf("HCM-testDuplicateAppend"));
+    if (t instanceof HTable) {
+      HTable table = (HTable) t;
+      table.setOperationTimeout(3 * 1000);
+
+      try {
+        Append append = new Append(ROW);
+        append.add(TEST_UTIL.fam1, QUALIFIER, VALUE);
+        Result result = table.append(append);
+
+        // Verify expected result
+        Cell[] cells = result.rawCells();
+        assertEquals(1, cells.length);
+        assertKey(cells[0], ROW, TEST_UTIL.fam1, QUALIFIER, VALUE);
+
+        // Verify expected result again
+        Result readResult = table.get(new Get(ROW));
+        cells = readResult.rawCells();
+        assertEquals(1, cells.length);
+        assertKey(cells[0], ROW, TEST_UTIL.fam1, QUALIFIER, VALUE);
+      } finally {
+        table.close();
+        connection.close();
+      }
+    }
   }
 
   /**
@@ -451,7 +500,7 @@ public class TestFromClientSide {
     byte [] endKey = regions.get(0).getRegionInfo().getEndKey();
     // Count rows with a filter that stops us before passed 'endKey'.
     // Should be count of rows in first region.
-    int endKeyCount = countRows(t, createScanWithRowFilter(endKey));
+    int endKeyCount = TEST_UTIL.countRows(t, createScanWithRowFilter(endKey));
     assertTrue(endKeyCount < rowCount);
 
     // How do I know I did not got to second region?  Thats tough.  Can't really
@@ -463,31 +512,96 @@ public class TestFromClientSide {
     // New test.  Make it so scan goes into next region by one and then two.
     // Make sure count comes out right.
     byte [] key = new byte [] {endKey[0], endKey[1], (byte)(endKey[2] + 1)};
-    int plusOneCount = countRows(t, createScanWithRowFilter(key));
+    int plusOneCount = TEST_UTIL.countRows(t, createScanWithRowFilter(key));
     assertEquals(endKeyCount + 1, plusOneCount);
     key = new byte [] {endKey[0], endKey[1], (byte)(endKey[2] + 2)};
-    int plusTwoCount = countRows(t, createScanWithRowFilter(key));
+    int plusTwoCount = TEST_UTIL.countRows(t, createScanWithRowFilter(key));
     assertEquals(endKeyCount + 2, plusTwoCount);
 
     // New test.  Make it so I scan one less than endkey.
     key = new byte [] {endKey[0], endKey[1], (byte)(endKey[2] - 1)};
-    int minusOneCount = countRows(t, createScanWithRowFilter(key));
+    int minusOneCount = TEST_UTIL.countRows(t, createScanWithRowFilter(key));
     assertEquals(endKeyCount - 1, minusOneCount);
     // For above test... study logs.  Make sure we do "Finished with scanning.."
     // in first region and that we do not fall into the next region.
 
     key = new byte [] {'a', 'a', 'a'};
-    int countBBB = countRows(t,
+    int countBBB = TEST_UTIL.countRows(t,
       createScanWithRowFilter(key, null, CompareFilter.CompareOp.EQUAL));
     assertEquals(1, countBBB);
 
-    int countGreater = countRows(t, createScanWithRowFilter(endKey, null,
+    int countGreater = TEST_UTIL.countRows(t, createScanWithRowFilter(endKey, null,
       CompareFilter.CompareOp.GREATER_OR_EQUAL));
     // Because started at start of table.
     assertEquals(0, countGreater);
-    countGreater = countRows(t, createScanWithRowFilter(endKey, endKey,
+    countGreater = TEST_UTIL.countRows(t, createScanWithRowFilter(endKey, endKey,
       CompareFilter.CompareOp.GREATER_OR_EQUAL));
     assertEquals(rowCount - endKeyCount, countGreater);
+  }
+
+  /**
+   * This is a coprocessor to inject a test failure so that a store scanner.reseek() call will
+   * fail with an IOException() on the first call.
+   */
+  public static class ExceptionInReseekRegionObserver extends BaseRegionObserver {
+    static AtomicLong reqCount = new AtomicLong(0);
+    class MyStoreScanner extends StoreScanner {
+      public MyStoreScanner(Store store, ScanInfo scanInfo, Scan scan, NavigableSet<byte[]> columns,
+          long readPt) throws IOException {
+        super(store, scanInfo, scan, columns, readPt);
+      }
+
+      @Override
+      protected List<KeyValueScanner> selectScannersFrom(
+          List<? extends KeyValueScanner> allScanners) {
+        List<KeyValueScanner> scanners = super.selectScannersFrom(allScanners);
+        List<KeyValueScanner> newScanners = new ArrayList<>(scanners.size());
+        for (KeyValueScanner scanner : scanners) {
+          newScanners.add(new DelegatingKeyValueScanner(scanner) {
+            @Override
+            public boolean reseek(Cell key) throws IOException {
+              if (reqCount.incrementAndGet() == 1) {
+                throw new IOException("Injected exception");
+              }
+              return super.reseek(key);
+            }
+          });
+        }
+        return newScanners;
+      }
+    }
+
+    @Override
+    public KeyValueScanner preStoreScannerOpen(ObserverContext<RegionCoprocessorEnvironment> c,
+        Store store, Scan scan, NavigableSet<byte[]> targetCols, KeyValueScanner s,
+        final long readPt) throws IOException {
+      return new MyStoreScanner(store, store.getScanInfo(), scan, targetCols, readPt);
+    }
+  }
+
+  /**
+   * Tests the case where a Scan can throw an IOException in the middle of the seek / reseek
+   * leaving the server side RegionScanner to be in dirty state. The client has to ensure that the
+   * ClientScanner does not get an exception and also sees all the data.
+   * @throws IOException
+   * @throws InterruptedException
+   */
+  @Test
+  public void testClientScannerIsResetWhenScanThrowsIOException()
+  throws IOException, InterruptedException {
+    TEST_UTIL.getConfiguration().setBoolean("hbase.client.log.scanner.activity", true);
+    TableName name = TableName.valueOf("testClientScannerIsResetWhenScanThrowsIOException");
+
+    HTableDescriptor htd = TEST_UTIL.createTableDescriptor(name, FAMILY);
+    htd.addCoprocessor(ExceptionInReseekRegionObserver.class.getName());
+    TEST_UTIL.getAdmin().createTable(htd);
+    try (Table t = TEST_UTIL.getConnection().getTable(name)) {
+      int rowCount = TEST_UTIL.loadTable(t, FAMILY, false);
+      TEST_UTIL.getAdmin().flush(name);
+      int actualRowCount = TEST_UTIL.countRows(t, new Scan().addColumn(FAMILY, FAMILY));
+      assertEquals(rowCount, actualRowCount);
+    }
+    assertTrue(ExceptionInReseekRegionObserver.reqCount.get() > 0);
   }
 
   /*
@@ -517,28 +631,9 @@ public class TestFromClientSide {
     return s;
   }
 
-  /*
-   * @param t
-   * @param s
-   * @return Count of rows in table.
-   * @throws IOException
-   */
-  private int countRows(final Table t, final Scan s)
-  throws IOException {
-    // Assert all rows in table.
-    ResultScanner scanner = t.getScanner(s);
-    int count = 0;
-    for (Result result: scanner) {
-      count++;
-      assertTrue(result.size() > 0);
-      // LOG.info("Count=" + count + ", row=" + Bytes.toString(result.getRow()));
-    }
-    return count;
-  }
-
   private void assertRowCount(final Table t, final int expected)
   throws IOException {
-    assertEquals(expected, countRows(t, new Scan()));
+    assertEquals(expected, TEST_UTIL.countRows(t, new Scan()));
   }
 
   /*
@@ -1810,6 +1905,33 @@ public class TestFromClientSide {
     }
     ht.close();
     admin.close();
+  }
+
+  @Test
+  public void testDeleteWithFailed() throws Exception {
+    TableName TABLE = TableName.valueOf("testDeleteWithFailed");
+
+    byte [][] ROWS = makeNAscii(ROW, 6);
+    byte [][] FAMILIES = makeNAscii(FAMILY, 3);
+    byte [][] VALUES = makeN(VALUE, 5);
+    long [] ts = {1000, 2000, 3000, 4000, 5000};
+
+    Table ht = TEST_UTIL.createTable(TABLE, FAMILIES, 3);
+
+    Put put = new Put(ROW);
+    put.addColumn(FAMILIES[0], QUALIFIER, ts[0], VALUES[0]);
+    ht.put(put);
+
+    // delete wrong family
+    Delete delete = new Delete(ROW);
+    delete.addFamily(FAMILIES[1], ts[0]);
+    ht.delete(delete);
+
+    Get get = new Get(ROW);
+    get.addFamily(FAMILIES[0]);
+    get.setMaxVersions(Integer.MAX_VALUE);
+    Result result = ht.get(get);
+    assertTrue(Bytes.equals(result.getValue(FAMILIES[0], QUALIFIER), VALUES[0]));
   }
 
   @Test
@@ -4354,6 +4476,66 @@ public class TestFromClientSide {
     assertEquals(r.getColumnLatestCell(FAMILY, QUALIFIERS[0]).getTimestamp(),
         r.getColumnLatestCell(FAMILY, QUALIFIERS[2]).getTimestamp());
   }
+  private List<Result> doAppend(final boolean walUsed) throws IOException {
+    LOG.info("Starting testAppend, walUsed is " + walUsed);
+    final TableName TABLENAME = TableName.valueOf(walUsed ? "testAppendWithWAL" : "testAppendWithoutWAL");
+    Table t = TEST_UTIL.createTable(TABLENAME, FAMILY);
+    final byte[] row1 = Bytes.toBytes("c");
+    final byte[] row2 = Bytes.toBytes("b");
+    final byte[] row3 = Bytes.toBytes("a");
+    final byte[] qual = Bytes.toBytes("qual");
+    Put put_0 = new Put(row2);
+    put_0.addColumn(FAMILY, qual, Bytes.toBytes("put"));
+    Put put_1 = new Put(row3);
+    put_1.addColumn(FAMILY, qual, Bytes.toBytes("put"));
+    Append append_0 = new Append(row1);
+    append_0.add(FAMILY, qual, Bytes.toBytes("i"));
+    Append append_1 = new Append(row1);
+    append_1.add(FAMILY, qual, Bytes.toBytes("k"));
+    Append append_2 = new Append(row1);
+    append_2.add(FAMILY, qual, Bytes.toBytes("e"));
+    if (!walUsed) {
+      append_2.setDurability(Durability.SKIP_WAL);
+    }
+    Append append_3 = new Append(row1);
+    append_3.add(FAMILY, qual, Bytes.toBytes("a"));
+    Scan s = new Scan();
+    s.setCaching(1);
+    t.append(append_0);
+    t.put(put_0);
+    t.put(put_1);
+    List<Result> results = new LinkedList<>();
+    try (ResultScanner scanner = t.getScanner(s)) {
+      t.append(append_1);
+      t.append(append_2);
+      t.append(append_3);
+      for (Result r : scanner) {
+        results.add(r);
+      }
+    }
+    TEST_UTIL.deleteTable(TABLENAME);
+    return results;
+  }
+
+  @Test
+  public void testAppendWithoutWAL() throws Exception {
+    List<Result> resultsWithWal = doAppend(true);
+    List<Result> resultsWithoutWal = doAppend(false);
+    assertEquals(resultsWithWal.size(), resultsWithoutWal.size());
+    for (int i = 0; i != resultsWithWal.size(); ++i) {
+      Result resultWithWal = resultsWithWal.get(i);
+      Result resultWithoutWal = resultsWithoutWal.get(i);
+      assertEquals(resultWithWal.rawCells().length, resultWithoutWal.rawCells().length);
+      for (int j = 0; j != resultWithWal.rawCells().length; ++j) {
+        Cell cellWithWal = resultWithWal.rawCells()[j];
+        Cell cellWithoutWal = resultWithoutWal.rawCells()[j];
+        assertTrue(Bytes.equals(CellUtil.cloneRow(cellWithWal), CellUtil.cloneRow(cellWithoutWal)));
+        assertTrue(Bytes.equals(CellUtil.cloneFamily(cellWithWal), CellUtil.cloneFamily(cellWithoutWal)));
+        assertTrue(Bytes.equals(CellUtil.cloneQualifier(cellWithWal), CellUtil.cloneQualifier(cellWithoutWal)));
+        assertTrue(Bytes.equals(CellUtil.cloneValue(cellWithWal), CellUtil.cloneValue(cellWithoutWal)));
+      }
+    }
+  }
 
   @Test
   public void testClientPoolRoundRobin() throws IOException {
@@ -4574,6 +4756,24 @@ public class TestFromClientSide {
     ok = table.checkAndPut(ROW, FAMILY, QUALIFIER, CompareOp.LESS_OR_EQUAL, value2, put2);
     assertEquals(ok, true);
     ok = table.checkAndPut(ROW, FAMILY, QUALIFIER, CompareOp.EQUAL, value2, put3);
+    assertEquals(ok, true);
+  }
+
+  @Test
+  public void testCheckAndDelete() throws IOException {
+    final byte [] value1 = Bytes.toBytes("aaaa");
+
+    Table table = TEST_UTIL.createTable(TableName.valueOf("testCheckAndDelete"),
+        FAMILY);
+
+    Put put = new Put(ROW);
+    put.addColumn(FAMILY, QUALIFIER, value1);
+    table.put(put);
+
+    Delete delete = new Delete(ROW);
+    delete.addColumns(FAMILY, QUALIFIER);
+
+    boolean ok = table.checkAndDelete(ROW, FAMILY, QUALIFIER, value1, delete);
     assertEquals(ok, true);
   }
 
@@ -5149,151 +5349,6 @@ public class TestFromClientSide {
   }
 
   @Test
-  public void testIllegalTableDescriptor() throws Exception {
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("testIllegalTableDescriptor"));
-    HColumnDescriptor hcd = new HColumnDescriptor(FAMILY);
-
-    // create table with 0 families
-    checkTableIsIllegal(htd);
-    htd.addFamily(hcd);
-    checkTableIsLegal(htd);
-
-    htd.setMaxFileSize(1024); // 1K
-    checkTableIsIllegal(htd);
-    htd.setMaxFileSize(0);
-    checkTableIsIllegal(htd);
-    htd.setMaxFileSize(1024 * 1024 * 1024); // 1G
-    checkTableIsLegal(htd);
-
-    htd.setMemStoreFlushSize(1024);
-    checkTableIsIllegal(htd);
-    htd.setMemStoreFlushSize(0);
-    checkTableIsIllegal(htd);
-    htd.setMemStoreFlushSize(128 * 1024 * 1024); // 128M
-    checkTableIsLegal(htd);
-
-    htd.setRegionSplitPolicyClassName("nonexisting.foo.class");
-    checkTableIsIllegal(htd);
-    htd.setRegionSplitPolicyClassName(null);
-    checkTableIsLegal(htd);
-
-    hcd.setBlocksize(0);
-    checkTableIsIllegal(htd);
-    hcd.setBlocksize(1024 * 1024 * 128); // 128M
-    checkTableIsIllegal(htd);
-    hcd.setBlocksize(1024);
-    checkTableIsLegal(htd);
-
-    hcd.setTimeToLive(0);
-    checkTableIsIllegal(htd);
-    hcd.setTimeToLive(-1);
-    checkTableIsIllegal(htd);
-    hcd.setTimeToLive(1);
-    checkTableIsLegal(htd);
-
-    hcd.setMinVersions(-1);
-    checkTableIsIllegal(htd);
-    hcd.setMinVersions(3);
-    try {
-      hcd.setMaxVersions(2);
-      fail();
-    } catch (IllegalArgumentException ex) {
-      // expected
-      hcd.setMaxVersions(10);
-    }
-    checkTableIsLegal(htd);
-
-    // HBASE-13776 Setting illegal versions for HColumnDescriptor
-    //  does not throw IllegalArgumentException
-    // finally, minVersions must be less than or equal to maxVersions
-    hcd.setMaxVersions(4);
-    hcd.setMinVersions(5);
-    checkTableIsIllegal(htd);
-    hcd.setMinVersions(3);
-
-    hcd.setScope(-1);
-    checkTableIsIllegal(htd);
-    hcd.setScope(0);
-    checkTableIsLegal(htd);
-
-    try {
-      hcd.setDFSReplication((short) -1);
-      fail("Illegal value for setDFSReplication did not throw");
-    } catch (IllegalArgumentException e) {
-      // pass
-    }
-    // set an illegal DFS replication value by hand
-    hcd.setValue(HColumnDescriptor.DFS_REPLICATION, "-1");
-    checkTableIsIllegal(htd);
-    try {
-      hcd.setDFSReplication((short) -1);
-      fail("Should throw exception if an illegal value is explicitly being set");
-    } catch (IllegalArgumentException e) {
-      // pass
-    }
-
-    // check the conf settings to disable sanity checks
-    htd.setMemStoreFlushSize(0);
-
-    // Check that logs warn on invalid table but allow it.
-    ListAppender listAppender = new ListAppender();
-    Logger log = Logger.getLogger(HMaster.class);
-    log.addAppender(listAppender);
-    log.setLevel(Level.WARN);
-
-    htd.setConfiguration("hbase.table.sanity.checks", Boolean.FALSE.toString());
-    checkTableIsLegal(htd);
-
-    assertFalse(listAppender.getMessages().isEmpty());
-    assertTrue(listAppender.getMessages().get(0).startsWith("MEMSTORE_FLUSHSIZE for table "
-        + "descriptor or \"hbase.hregion.memstore.flush.size\" (0) is too small, which might "
-        + "cause very frequent flushing."));
-
-    log.removeAppender(listAppender);
-  }
-
-  private static class ListAppender extends AppenderSkeleton {
-    private final List<String> messages = new ArrayList<String>();
-
-    @Override
-    protected void append(LoggingEvent event) {
-      messages.add(event.getMessage().toString());
-    }
-
-    @Override
-    public void close() {
-    }
-
-    @Override
-    public boolean requiresLayout() {
-      return false;
-    }
-
-    public List<String> getMessages() {
-      return messages;
-    }
-  }
-
-  private void checkTableIsLegal(HTableDescriptor htd) throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
-    admin.createTable(htd);
-    assertTrue(admin.tableExists(htd.getTableName()));
-    admin.disableTable(htd.getTableName());
-    admin.deleteTable(htd.getTableName());
-  }
-
-  private void checkTableIsIllegal(HTableDescriptor htd) throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
-    try {
-      admin.createTable(htd);
-      fail();
-    } catch(Exception ex) {
-      // should throw ex
-    }
-    assertFalse(admin.tableExists(htd.getTableName()));
-  }
-
-  @Test
   public void testRawScanRespectsVersions() throws Exception {
     TableName TABLE = TableName.valueOf("testRawScan");
     Table table = TEST_UTIL.createTable(TABLE, FAMILY);
@@ -5361,6 +5416,47 @@ public class TestFromClientSide {
 
     table.close();
     TEST_UTIL.deleteTable(TABLE);
+  }
+
+  @Test
+  public void testEmptyFilterList() throws Exception {
+    // Test Initialization.
+    TableName TABLE = TableName.valueOf("testEmptyFilterList");
+    Table table = TEST_UTIL.createTable(TABLE, FAMILY);
+
+    // Insert one row each region
+    Put put = new Put(Bytes.toBytes("row"));
+    put.addColumn(FAMILY, QUALIFIER, VALUE);
+    table.put(put);
+
+    List<Result> scanResults = new LinkedList<>();    
+    Scan scan = new Scan();
+    scan.setFilter(new FilterList());
+    try (ResultScanner scanner = table.getScanner(scan)) {
+      for (Result r : scanner) {
+        scanResults.add(r);
+      }
+    }
+    
+    Get g = new Get(Bytes.toBytes("row"));
+    g.setFilter(new FilterList());
+    Result getResult = table.get(g);
+    if (scanResults.isEmpty()) {
+      assertTrue(getResult.isEmpty());
+    } else if(scanResults.size() == 1) {
+      Result scanResult = scanResults.get(0);
+      assertEquals(scanResult.rawCells().length, getResult.rawCells().length);
+      for (int i = 0; i != scanResult.rawCells().length; ++i) {
+        Cell scanCell = scanResult.rawCells()[i];
+        Cell getCell = getResult.rawCells()[i];
+        assertEquals(0, Bytes.compareTo(CellUtil.cloneRow(scanCell), CellUtil.cloneRow(getCell)));
+        assertEquals(0, Bytes.compareTo(CellUtil.cloneFamily(scanCell), CellUtil.cloneFamily(getCell)));
+        assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(scanCell), CellUtil.cloneQualifier(getCell)));
+        assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(scanCell), CellUtil.cloneValue(getCell)));
+      }
+    } else {
+      fail("The result retrieved from SCAN and Get should be same");
+    }
   }
 
   @Test

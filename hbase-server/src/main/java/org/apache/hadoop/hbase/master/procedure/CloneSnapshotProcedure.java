@@ -18,21 +18,18 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.IOException;
-import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -40,6 +37,7 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.TableExistsException;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionDispatcher;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
@@ -48,33 +46,27 @@ import org.apache.hadoop.hbase.master.MetricsSnapshot;
 import org.apache.hadoop.hbase.master.procedure.CreateTableProcedure.CreateHdfsRegions;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.CloneSnapshotState;
-import org.apache.hadoop.hbase.util.FSTableDescriptors;
-import org.apache.hadoop.hbase.util.FSUtils;
-import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.CloneSnapshotState;
 import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.RestoreSnapshotException;
 import org.apache.hadoop.hbase.snapshot.RestoreSnapshotHelper;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
-import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.hbase.util.FSTableDescriptors;
+import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.Pair;
 
 import com.google.common.base.Preconditions;
 
 @InterfaceAudience.Private
 public class CloneSnapshotProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, CloneSnapshotState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineTableProcedure<CloneSnapshotState> {
   private static final Log LOG = LogFactory.getLog(CloneSnapshotProcedure.class);
 
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
-
-  private UserGroupInformation user;
   private HTableDescriptor hTableDescriptor;
   private SnapshotDescription snapshot;
   private List<HRegionInfo> newRegions = null;
@@ -97,17 +89,12 @@ public class CloneSnapshotProcedure
    * @param env MasterProcedureEnv
    * @param hTableDescriptor the table to operate on
    * @param snapshot snapshot to clone from
-   * @throws IOException
    */
-  public CloneSnapshotProcedure(
-      final MasterProcedureEnv env,
-      final HTableDescriptor hTableDescriptor,
-      final SnapshotDescription snapshot)
-      throws IOException {
+  public CloneSnapshotProcedure(final MasterProcedureEnv env,
+      final HTableDescriptor hTableDescriptor, final SnapshotDescription snapshot) {
+    super(env);
     this.hTableDescriptor = hTableDescriptor;
     this.snapshot = snapshot;
-    this.user = env.getRequestUser().getUGI();
-    this.setOwner(this.user.getShortUserName());
 
     getMonitorStatus();
   }
@@ -166,8 +153,12 @@ public class CloneSnapshotProcedure
           throw new UnsupportedOperationException("unhandled state=" + state);
       }
     } catch (IOException e) {
-      LOG.error("Error trying to create table=" + getTableName() + " state=" + state, e);
-      setFailure("master-create-table", e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-clone-snapshot", e);
+      } else {
+        LOG.warn("Retriable error trying to clone snapshot=" + snapshot.getName() +
+          " to table=" + getTableName() + " state=" + state, e);
+      }
     }
     return Flow.HAS_MORE_STATE;
   }
@@ -175,38 +166,23 @@ public class CloneSnapshotProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final CloneSnapshotState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
+    if (state == CloneSnapshotState.CLONE_SNAPSHOT_PRE_OPERATION) {
+      DeleteTableProcedure.deleteTableStates(env, getTableName());
+      // TODO-MAYBE: call the deleteTable coprocessor event?
+      return;
     }
-    try {
-      switch (state) {
-        case CLONE_SNAPSHOT_POST_OPERATION:
-          // TODO-MAYBE: call the deleteTable coprocessor event?
-          break;
-        case CLONE_SNAPSHOT_UPDATE_DESC_CACHE:
-          DeleteTableProcedure.deleteTableDescriptorCache(env, getTableName());
-          break;
-        case CLONE_SNAPSHOT_ASSIGN_REGIONS:
-          DeleteTableProcedure.deleteAssignmentState(env, getTableName());
-          break;
-        case CLONE_SNAPSHOT_ADD_TO_META:
-          DeleteTableProcedure.deleteFromMeta(env, getTableName(), newRegions);
-          break;
-        case CLONE_SNAPSHOT_WRITE_FS_LAYOUT:
-          DeleteTableProcedure.deleteFromFs(env, getTableName(), newRegions, false);
-          break;
-        case CLONE_SNAPSHOT_PRE_OPERATION:
-          DeleteTableProcedure.deleteTableStates(env, getTableName());
-          // TODO-MAYBE: call the deleteTable coprocessor event?
-          break;
-        default:
-          throw new UnsupportedOperationException("unhandled state=" + state);
-      }
-    } catch (IOException e) {
-      // This will be retried. Unless there is a bug in the code,
-      // this should be just a "temporary error" (e.g. network down)
-      LOG.warn("Failed rollback attempt step=" + state + " table=" + getTableName(), e);
-      throw e;
+
+    // The procedure doesn't have a rollback. The execution will succeed, at some point.
+    throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final CloneSnapshotState state) {
+    switch (state) {
+      case CLONE_SNAPSHOT_PRE_OPERATION:
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -226,15 +202,6 @@ public class CloneSnapshotProcedure
   }
 
   @Override
-  protected void setNextState(final CloneSnapshotState state) {
-    if (aborted.get()) {
-      setAbortFailure("clone-snapshot", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
   public TableName getTableName() {
     return hTableDescriptor.getTableName();
   }
@@ -242,12 +209,6 @@ public class CloneSnapshotProcedure
   @Override
   public TableOperationType getTableOperationType() {
     return TableOperationType.CREATE; // Clone is creating a table
-  }
-
-  @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
   }
 
   @Override
@@ -266,7 +227,7 @@ public class CloneSnapshotProcedure
 
     MasterProcedureProtos.CloneSnapshotStateData.Builder cloneSnapshotMsg =
       MasterProcedureProtos.CloneSnapshotStateData.newBuilder()
-        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(this.user))
+        .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
         .setSnapshot(this.snapshot)
         .setTableSchema(ProtobufUtil.convertToTableSchema(hTableDescriptor));
     if (newRegions != null) {
@@ -297,7 +258,7 @@ public class CloneSnapshotProcedure
 
     MasterProcedureProtos.CloneSnapshotStateData cloneSnapshotMsg =
       MasterProcedureProtos.CloneSnapshotStateData.parseDelimitedFrom(stream);
-    user = MasterProcedureUtil.toUserInfo(cloneSnapshotMsg.getUserInfo());
+    setUser(MasterProcedureUtil.toUserInfo(cloneSnapshotMsg.getUserInfo()));
     snapshot = cloneSnapshotMsg.getSnapshot();
     hTableDescriptor = ProtobufUtil.convertToHTableDesc(cloneSnapshotMsg.getTableSchema());
     if (cloneSnapshotMsg.getRegionInfoCount() == 0) {
@@ -321,19 +282,6 @@ public class CloneSnapshotProcedure
     }
     // Make sure that the monitor status is set up
     getMonitorStatus();
-  }
-
-  @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) {
-      return false;
-    }
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, getTableName());
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, getTableName());
   }
 
   /**
@@ -372,13 +320,7 @@ public class CloneSnapshotProcedure
 
     final MasterCoprocessorHost cpHost = env.getMasterCoprocessorHost();
     if (cpHost != null) {
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          cpHost.preCreateTableAction(hTableDescriptor, null);
-          return null;
-        }
-      });
+      cpHost.preCreateTableAction(hTableDescriptor, null, getUser());
     }
   }
 
@@ -394,13 +336,7 @@ public class CloneSnapshotProcedure
     if (cpHost != null) {
       final HRegionInfo[] regions = (newRegions == null) ? null :
         newRegions.toArray(new HRegionInfo[newRegions.size()]);
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          cpHost.postCompletedCreateTableAction(hTableDescriptor, regions);
-          return null;
-        }
-      });
+      cpHost.postCompletedCreateTableAction(hTableDescriptor, regions, getUser());
     }
   }
 

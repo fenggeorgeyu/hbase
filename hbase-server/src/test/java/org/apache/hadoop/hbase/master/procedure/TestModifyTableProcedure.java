@@ -22,73 +22,22 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.ModifyTableState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ModifyTableState;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
 @Category({MasterTests.class, MediumTests.class})
-public class TestModifyTableProcedure {
-  private static final Log LOG = LogFactory.getLog(TestModifyTableProcedure.class);
-
-  protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
-
-  private static long nonceGroup = HConstants.NO_NONCE;
-  private static long nonce = HConstants.NO_NONCE;
-
-  private static void setupConf(Configuration conf) {
-    conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
-  }
-
-  @BeforeClass
-  public static void setupCluster() throws Exception {
-    setupConf(UTIL.getConfiguration());
-    UTIL.startMiniCluster(1);
-  }
-
-  @AfterClass
-  public static void cleanupTest() throws Exception {
-    try {
-      UTIL.shutdownMiniCluster();
-    } catch (Exception e) {
-      LOG.warn("failure shutting down cluster", e);
-    }
-  }
-
-  @Before
-  public void setup() throws Exception {
-    ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(getMasterProcedureExecutor(), false);
-    nonceGroup =
-        MasterProcedureTestingUtility.generateNonceGroup(UTIL.getHBaseCluster().getMaster());
-    nonce = MasterProcedureTestingUtility.generateNonce(UTIL.getHBaseCluster().getMaster());
-  }
-
-  @After
-  public void tearDown() throws Exception {
-    ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(getMasterProcedureExecutor(), false);
-    for (HTableDescriptor htd: UTIL.getHBaseAdmin().listTables()) {
-      LOG.info("Tear down, remove table=" + htd.getTableName());
-      UTIL.deleteTable(htd.getTableName());
-    }
-  }
+public class TestModifyTableProcedure extends TestTableDDLProcedureBase {
 
   @Test(timeout=60000)
   public void testModifyTable() throws Exception {
@@ -256,11 +205,7 @@ public class TestModifyTableProcedure {
 
     // Restart the executor and execute the step twice
     int numberOfSteps = ModifyTableState.values().length;
-    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(
-      procExec,
-      procId,
-      numberOfSteps,
-      ModifyTableState.values());
+    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId, numberOfSteps);
 
     // Validate descriptor
     HTableDescriptor currentHtd = UTIL.getHBaseAdmin().getTableDescriptor(tableName);
@@ -298,8 +243,7 @@ public class TestModifyTableProcedure {
 
     // Restart the executor and execute the step twice
     int numberOfSteps = ModifyTableState.values().length;
-    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId, numberOfSteps,
-      ModifyTableState.values());
+    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId, numberOfSteps);
 
     // Validate descriptor
     HTableDescriptor currentHtd = UTIL.getHBaseAdmin().getTableDescriptor(tableName);
@@ -334,13 +278,8 @@ public class TestModifyTableProcedure {
     long procId = procExec.submitProcedure(
       new ModifyTableProcedure(procExec.getEnvironment(), htd), nonceGroup, nonce);
 
-    // Restart the executor and rollback the step twice
-    int numberOfSteps = ModifyTableState.values().length - 4; // failing in the middle of proc
-    MasterProcedureTestingUtility.testRollbackAndDoubleExecution(
-      procExec,
-      procId,
-      numberOfSteps,
-      ModifyTableState.values());
+    int numberOfSteps = 1; // failing at pre operation
+    MasterProcedureTestingUtility.testRollbackAndDoubleExecution(procExec, procId, numberOfSteps);
 
     // cf2 should not be present
     MasterProcedureTestingUtility.validateTableCreation(UTIL.getHBaseCluster().getMaster(),
@@ -372,59 +311,11 @@ public class TestModifyTableProcedure {
       new ModifyTableProcedure(procExec.getEnvironment(), htd), nonceGroup, nonce);
 
     // Restart the executor and rollback the step twice
-    int numberOfSteps = ModifyTableState.values().length - 4; // failing in the middle of proc
-    MasterProcedureTestingUtility.testRollbackAndDoubleExecution(
-      procExec,
-      procId,
-      numberOfSteps,
-      ModifyTableState.values());
+    int numberOfSteps = 1; // failing at pre operation
+    MasterProcedureTestingUtility.testRollbackAndDoubleExecution(procExec, procId, numberOfSteps);
 
     // cf2 should not be present
     MasterProcedureTestingUtility.validateTableCreation(UTIL.getHBaseCluster().getMaster(),
       tableName, regions, "cf1");
-  }
-
-  @Test(timeout = 60000)
-  public void testRollbackAndDoubleExecutionAfterPONR() throws Exception {
-    final TableName tableName = TableName.valueOf("testRollbackAndDoubleExecutionAfterPONR");
-    final String familyToAddName = "cf2";
-    final String familyToRemove = "cf1";
-    final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
-
-    // create the table
-    HRegionInfo[] regions = MasterProcedureTestingUtility.createTable(
-      procExec, tableName, null, familyToRemove);
-    UTIL.getHBaseAdmin().disableTable(tableName);
-
-    ProcedureTestingUtility.waitNoProcedureRunning(procExec);
-    ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
-
-    HTableDescriptor htd = new HTableDescriptor(UTIL.getHBaseAdmin().getTableDescriptor(tableName));
-    htd.setCompactionEnabled(!htd.isCompactionEnabled());
-    htd.addFamily(new HColumnDescriptor(familyToAddName));
-    htd.removeFamily(familyToRemove.getBytes());
-    htd.setRegionReplication(3);
-
-    // Start the Modify procedure && kill the executor
-    long procId = procExec.submitProcedure(
-      new ModifyTableProcedure(procExec.getEnvironment(), htd), nonceGroup, nonce);
-
-    // Failing after MODIFY_TABLE_DELETE_FS_LAYOUT we should not trigger the rollback.
-    // NOTE: the 5 (number of MODIFY_TABLE_DELETE_FS_LAYOUT + 1 step) is hardcoded,
-    //       so you have to look at this test at least once when you add a new step.
-    int numberOfSteps = 5;
-    MasterProcedureTestingUtility.testRollbackAndDoubleExecutionAfterPONR(
-      procExec,
-      procId,
-      numberOfSteps,
-      ModifyTableState.values());
-
-    // "cf2" should be added and "cf1" should be removed
-    MasterProcedureTestingUtility.validateTableCreation(UTIL.getHBaseCluster().getMaster(),
-      tableName, regions, false, familyToAddName);
-  }
-
-  private ProcedureExecutor<MasterProcedureEnv> getMasterProcedureExecutor() {
-    return UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor();
   }
 }

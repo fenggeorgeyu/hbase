@@ -35,18 +35,17 @@ import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.io.SizedCellScanner;
-import org.apache.hadoop.hbase.ipc.PayloadCarryingRpcController;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos;
-import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.protobuf.generated.WALProtos;
+import org.apache.hadoop.hbase.ipc.HBaseRpcController;
+import org.apache.hadoop.hbase.ipc.HBaseRpcControllerImpl;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
-import org.apache.hadoop.hbase.util.ByteStringer;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 import org.apache.hadoop.hbase.wal.WALKey;
-
-import com.google.protobuf.ServiceException;
 
 @InterfaceAudience.Private
 public class ReplicationProtbufUtil {
@@ -66,11 +65,11 @@ public class ReplicationProtbufUtil {
     Pair<AdminProtos.ReplicateWALEntryRequest, CellScanner> p =
         buildReplicateWALEntryRequest(entries, null, replicationClusterId, sourceBaseNamespaceDir,
           sourceHFileArchiveDir);
-    PayloadCarryingRpcController controller = new PayloadCarryingRpcController(p.getSecond());
+    HBaseRpcController controller = new HBaseRpcControllerImpl(p.getSecond());
     try {
       admin.replicateWALEntry(controller, p.getFirst());
-    } catch (ServiceException se) {
-      throw ProtobufUtil.getRemoteException(se);
+    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException e) {
+      throw ProtobufUtil.handleRemoteException(e);
     }
   }
 
@@ -113,10 +112,10 @@ public class ReplicationProtbufUtil {
       WALProtos.WALKey.Builder keyBuilder = entryBuilder.getKeyBuilder();
       WALKey key = entry.getKey();
       keyBuilder.setEncodedRegionName(
-        ByteStringer.wrap(encodedRegionName == null
+          UnsafeByteOperations.unsafeWrap(encodedRegionName == null
             ? key.getEncodedRegionName()
             : encodedRegionName));
-      keyBuilder.setTableName(ByteStringer.wrap(key.getTablename().getName()));
+      keyBuilder.setTableName(UnsafeByteOperations.unsafeWrap(key.getTablename().getName()));
       keyBuilder.setLogSequenceNumber(key.getLogSeqNum());
       keyBuilder.setWriteTime(key.getWriteTime());
       if (key.getNonce() != HConstants.NO_NONCE) {
@@ -137,7 +136,7 @@ public class ReplicationProtbufUtil {
       NavigableMap<byte[], Integer> scopes = key.getReplicationScopes();
       if (scopes != null && !scopes.isEmpty()) {
         for (Map.Entry<byte[], Integer> scope: scopes.entrySet()) {
-          scopeBuilder.setFamily(ByteStringer.wrap(scope.getKey()));
+          scopeBuilder.setFamily(UnsafeByteOperations.unsafeWrap(scope.getKey()));
           WALProtos.ScopeType scopeType =
               WALProtos.ScopeType.valueOf(scope.getValue().intValue());
           scopeBuilder.setScopeType(scopeType);

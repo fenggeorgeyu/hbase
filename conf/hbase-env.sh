@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 #
 #/**
 # * Licensed to the Apache Software Foundation (ASF) under one
@@ -23,8 +24,8 @@
 # so try to keep things idempotent unless you want to take an even deeper look
 # into the startup scripts (bin/hbase, etc.)
 
-# The java implementation to use.  Java 1.7+ required.
-# export JAVA_HOME=/usr/java/jdk1.6.0/
+# The java implementation to use.  Java 1.8+ required.
+# export JAVA_HOME=/usr/java/jdk1.8.0/
 
 # Extra Java CLASSPATH elements.  Optional.
 # export HBASE_CLASSPATH=
@@ -41,10 +42,6 @@
 # For more on why as well as other possible settings,
 # see http://hbase.apache.org/book.html#performance
 export HBASE_OPTS="-XX:+UseConcMarkSweepGC"
-
-# Configure PermSize. Only needed in JDK7. You can safely remove it for JDK8+
-export HBASE_MASTER_OPTS="$HBASE_MASTER_OPTS -XX:PermSize=128m -XX:MaxPermSize=128m"
-export HBASE_REGIONSERVER_OPTS="$HBASE_REGIONSERVER_OPTS -XX:PermSize=128m -XX:MaxPermSize=128m"
 
 # Uncomment one of the below three options to enable java garbage collection logging for the server-side processes.
 

@@ -36,6 +36,7 @@ import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -76,8 +77,8 @@ import org.apache.hadoop.hbase.master.RegionState.State;
 import org.apache.hadoop.hbase.master.balancer.FavoredNodeAssignmentHelper;
 import org.apache.hadoop.hbase.master.balancer.FavoredNodeLoadBalancer;
 import org.apache.hadoop.hbase.master.normalizer.NormalizationPlan.PlanType;
-import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionStateTransition;
-import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 import org.apache.hadoop.hbase.quotas.QuotaExceededException;
 import org.apache.hadoop.hbase.regionserver.RegionOpeningState;
 import org.apache.hadoop.hbase.regionserver.RegionServerAbortedException;
@@ -87,6 +88,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.KeyLocker;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.PairOfSameType;
+import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
@@ -149,8 +151,8 @@ public class AssignmentManager {
 
   private final ExecutorService executorService;
 
-  // Thread pool executor service. TODO, consolidate with executorService?
   private java.util.concurrent.ExecutorService threadPoolExecutorService;
+  private ScheduledThreadPoolExecutor scheduledThreadPoolExecutor;
 
   private final RegionStates regionStates;
 
@@ -202,6 +204,8 @@ public class AssignmentManager {
 
   private RegionStateListener regionStateListener;
 
+  private RetryCounter.BackoffPolicy backoffPolicy;
+  private RetryCounter.RetryConfig retryConfig;
   /**
    * Constructs a new assignment manager.
    *
@@ -240,8 +244,13 @@ public class AssignmentManager {
         "hbase.meta.assignment.retry.sleeptime", 1000l);
     this.balancer = balancer;
     int maxThreads = conf.getInt("hbase.assignment.threads.max", 30);
+
     this.threadPoolExecutorService = Threads.getBoundedCachedThreadPool(
-      maxThreads, 60L, TimeUnit.SECONDS, Threads.newDaemonThreadFactory("AM."));
+        maxThreads, 60L, TimeUnit.SECONDS, Threads.newDaemonThreadFactory("AM."));
+
+    this.scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(1,
+        Threads.newDaemonThreadFactory("AM.Scheduler"));
+
     this.regionStates = new RegionStates(
       server, tableStateManager, serverManager, regionStateStore);
 
@@ -254,6 +263,23 @@ public class AssignmentManager {
 
     this.metricsAssignmentManager = new MetricsAssignmentManager();
     this.tableLockManager = tableLockManager;
+
+    // Configurations for retrying opening a region on receiving a FAILED_OPEN
+    this.retryConfig = new RetryCounter.RetryConfig();
+    this.retryConfig.setSleepInterval(conf.getLong("hbase.assignment.retry.sleep.initial", 0l));
+    // Set the max time limit to the initial sleep interval so we use a constant time sleep strategy
+    // if the user does not set a max sleep limit
+    this.retryConfig.setMaxSleepTime(conf.getLong("hbase.assignment.retry.sleep.max",
+        retryConfig.getSleepInterval()));
+    this.backoffPolicy = getBackoffPolicy();
+  }
+
+  /**
+   * Returns the backoff policy used for Failed Region Open retries
+   * @return the backoff policy used for Failed Region Open retries
+   */
+  RetryCounter.BackoffPolicy getBackoffPolicy() {
+    return new RetryCounter.ExponentialBackoffPolicyWithLimit();
   }
 
   MetricsAssignmentManager getAssignmentManagerMetrics() {
@@ -1642,6 +1668,25 @@ public class AssignmentManager {
   }
 
   /**
+   * Get number of replicas of a table
+   */
+  private static int getNumReplicas(MasterServices master, TableName table) {
+    int numReplica = 1;
+    try {
+      HTableDescriptor htd = master.getTableDescriptors().get(table);
+      if (htd == null) {
+        LOG.warn("master can not get TableDescriptor from table '" + table);
+      } else {
+        numReplica = htd.getRegionReplication();
+      }
+    } catch (IOException e){
+      LOG.warn("Couldn't get the replication attribute of the table " + table + " due to "
+          + e.getMessage());
+    }
+    return numReplica;
+  }
+
+  /**
    * Get a list of replica regions that are:
    * not recorded in meta yet. We might not have recorded the locations
    * for the replicas since the replicas may not have been online yet, master restarted
@@ -1657,9 +1702,9 @@ public class AssignmentManager {
     List<HRegionInfo> regionsNotRecordedInMeta = new ArrayList<HRegionInfo>();
     for (HRegionInfo hri : regionsRecordedInMeta) {
       TableName table = hri.getTable();
-      HTableDescriptor htd = master.getTableDescriptors().get(table);
-      // look at the HTD for the replica count. That's the source of truth
-      int desiredRegionReplication = htd.getRegionReplication();
+      if(master.getTableDescriptors().get(table) == null)
+        continue;
+      int  desiredRegionReplication = getNumReplicas(master, table);
       for (int i = 0; i < desiredRegionReplication; i++) {
         HRegionInfo replica = RegionReplicaUtil.getRegionInfoForReplica(hri, i);
         if (regionsRecordedInMeta.contains(replica)) continue;
@@ -1702,8 +1747,7 @@ public class AssignmentManager {
       // maybe because it crashed.
       PairOfSameType<HRegionInfo> p = MetaTableAccessor.getMergeRegions(result);
       if (p.getFirst() != null && p.getSecond() != null) {
-        int numReplicas = ((MasterServices)server).getTableDescriptors().get(p.getFirst().
-            getTable()).getRegionReplication();
+        int numReplicas = getNumReplicas(server, p.getFirst().getTable());
         for (HRegionInfo merge : p) {
           for (int i = 1; i < numReplicas; i++) {
             replicasToClose.add(RegionReplicaUtil.getRegionInfoForReplica(merge, i));
@@ -2028,6 +2072,11 @@ public class AssignmentManager {
     threadPoolExecutorService.submit(new AssignCallable(this, regionInfo));
   }
 
+  void invokeAssignLater(HRegionInfo regionInfo, long sleepMillis) {
+    scheduledThreadPoolExecutor.schedule(new DelayedAssignCallable(
+        new AssignCallable(this, regionInfo)), sleepMillis, TimeUnit.MILLISECONDS);
+  }
+
   void invokeUnAssign(HRegionInfo regionInfo) {
     threadPoolExecutorService.submit(new UnAssignCallable(this, regionInfo));
   }
@@ -2233,7 +2282,10 @@ public class AssignmentManager {
         } catch (HBaseIOException e) {
           LOG.warn("Failed to get region plan", e);
         }
-        invokeAssign(hri);
+        // Have the current thread sleep a bit before resubmitting the RPC request
+        long sleepTime = backoffPolicy.getBackoffTime(retryConfig,
+            failedOpenTracker.get(encodedName).get());
+        invokeAssignLater(hri, sleepTime);
       }
     }
     // Null means no error
@@ -2645,15 +2697,7 @@ public class AssignmentManager {
         }
       }
     }
-    int numReplicas = 1;
-    try {
-      numReplicas = ((MasterServices)server).getTableDescriptors().get(mergedHri.getTable()).
-          getRegionReplication();
-    } catch (IOException e) {
-      LOG.warn("Couldn't get the replication attribute of the table " + mergedHri.getTable() +
-          " due to " + e.getMessage() + ". The assignment of replicas for the merged region " +
-          "will not be done");
-    }
+    int numReplicas = getNumReplicas(server, mergedHri.getTable());
     List<HRegionInfo> regions = new ArrayList<HRegionInfo>();
     for (int i = 1; i < numReplicas; i++) {
       regions.add(RegionReplicaUtil.getRegionInfoForReplica(mergedHri, i));
@@ -2674,15 +2718,7 @@ public class AssignmentManager {
     // create new regions for the replica, and assign them to match with the
     // current replica assignments. If replica1 of parent is assigned to RS1,
     // the replica1s of daughters will be on the same machine
-    int numReplicas = 1;
-    try {
-      numReplicas = ((MasterServices)server).getTableDescriptors().get(parentHri.getTable()).
-          getRegionReplication();
-    } catch (IOException e) {
-      LOG.warn("Couldn't get the replication attribute of the table " + parentHri.getTable() +
-          " due to " + e.getMessage() + ". The assignment of daughter replicas " +
-          "replicas will not be done");
-    }
+    int numReplicas = getNumReplicas(server, parentHri.getTable());
     // unassign the old replicas
     List<HRegionInfo> parentRegion = new ArrayList<HRegionInfo>();
     parentRegion.add(parentHri);
@@ -2731,6 +2767,8 @@ public class AssignmentManager {
   public Set<HRegionInfo> getReplicasToClose() {
     return replicasToClose;
   }
+
+  public Map<String, AtomicInteger> getFailedOpenTracker() {return failedOpenTracker;}
 
   /**
    * A region is offline.  The new state should be the specified one,
@@ -2933,5 +2971,17 @@ public class AssignmentManager {
 
   void setRegionStateListener(RegionStateListener listener) {
     this.regionStateListener = listener;
+  }
+
+  private class DelayedAssignCallable implements Runnable {
+    Callable callable;
+    public DelayedAssignCallable(Callable callable) {
+      this.callable = callable;
+    }
+
+    @Override
+    public void run() {
+      threadPoolExecutorService.submit(callable);
+    }
   }
 }

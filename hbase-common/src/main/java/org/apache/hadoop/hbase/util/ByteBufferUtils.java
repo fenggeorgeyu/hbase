@@ -17,6 +17,7 @@
 package org.apache.hadoop.hbase.util;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -24,6 +25,7 @@ import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
@@ -572,6 +574,10 @@ public final class ByteBufferUtils {
   }
 
   public static boolean equals(ByteBuffer buf1, int o1, int l1, ByteBuffer buf2, int o2, int l2) {
+    if ((l1 == 0) || (l2 == 0)) {
+      // both 0 length, return true, or else false
+      return l1 == l2;
+    }
     // Since we're often comparing adjacent sorted data,
     // it's usual to have equal arrays except for the very last byte
     // so check that first
@@ -626,6 +632,10 @@ public final class ByteBufferUtils {
   }
 
   public static boolean equals(ByteBuffer buf1, int o1, int l1, byte[] buf2, int o2, int l2) {
+    if ((l1 == 0) || (l2 == 0)) {
+      // both 0 length, return true, or else false
+      return l1 == l2;
+    }
     // Since we're often comparing adjacent sorted data,
     // it's usual to have equal arrays except for the very last byte
     // so check that first
@@ -982,6 +992,21 @@ public final class ByteBufferUtils {
       in.get(out, destinationOffset, length);
       in.position(oldPos);
     }
+  }
+
+  /**
+   * Similar to  {@link Arrays#copyOfRange(byte[], int, int)}
+   * @param original the buffer from which the copy has to happen
+   * @param from the starting index
+   * @param to the ending index
+   * @return a byte[] created out of the copy
+   */
+  public static byte[] copyOfRange(ByteBuffer original, int from, int to) {
+    int newLength = to - from;
+    if (newLength < 0) throw new IllegalArgumentException(from + " > " + to);
+    byte[] copy = new byte[newLength];
+    ByteBufferUtils.copyFromBufferToArray(copy, original, from, 0, newLength);
+    return copy;
   }
 
   // For testing purpose

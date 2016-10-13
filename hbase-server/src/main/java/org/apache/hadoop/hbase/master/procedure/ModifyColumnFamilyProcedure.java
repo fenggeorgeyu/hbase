@@ -21,9 +21,7 @@ package org.apache.hadoop.hbase.master.procedure;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.security.PrivilegedExceptionAction;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -35,43 +33,40 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
-import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProcedureProtos.ModifyColumnFamilyState;
-import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ModifyColumnFamilyState;
 
 /**
  * The procedure to modify a column family from an existing table.
  */
 @InterfaceAudience.Private
 public class ModifyColumnFamilyProcedure
-    extends StateMachineProcedure<MasterProcedureEnv, ModifyColumnFamilyState>
-    implements TableProcedureInterface {
+    extends AbstractStateMachineTableProcedure<ModifyColumnFamilyState> {
   private static final Log LOG = LogFactory.getLog(ModifyColumnFamilyProcedure.class);
-
-  private final AtomicBoolean aborted = new AtomicBoolean(false);
 
   private TableName tableName;
   private HTableDescriptor unmodifiedHTableDescriptor;
   private HColumnDescriptor cfDescriptor;
-  private UserGroupInformation user;
 
   private Boolean traceEnabled;
 
   public ModifyColumnFamilyProcedure() {
+    super();
     this.unmodifiedHTableDescriptor = null;
     this.traceEnabled = null;
   }
 
-  public ModifyColumnFamilyProcedure(
-      final MasterProcedureEnv env,
-      final TableName tableName,
-      final HColumnDescriptor cfDescriptor) throws IOException {
+  public ModifyColumnFamilyProcedure(final MasterProcedureEnv env, final TableName tableName,
+      final HColumnDescriptor cfDescriptor) {
+    this(env, tableName, cfDescriptor, null);
+  }
+
+  public ModifyColumnFamilyProcedure(final MasterProcedureEnv env, final TableName tableName,
+      final HColumnDescriptor cfDescriptor, final ProcedurePrepareLatch latch) {
+    super(env, latch);
     this.tableName = tableName;
     this.cfDescriptor = cfDescriptor;
-    this.user = env.getRequestUser().getUGI();
-    this.setOwner(this.user.getShortUserName());
     this.unmodifiedHTableDescriptor = null;
     this.traceEnabled = null;
   }
@@ -108,10 +103,12 @@ public class ModifyColumnFamilyProcedure
         throw new UnsupportedOperationException(this + " unhandled state=" + state);
       }
     } catch (IOException e) {
-      LOG.warn("Error trying to modify the column family " + getColumnFamilyName()
-          + " of the table " + tableName + "(in state=" + state + ")", e);
-
-      setFailure("master-modify-columnfamily", e);
+      if (isRollbackSupported(state)) {
+        setFailure("master-modify-columnfamily", e);
+      } else {
+        LOG.warn("Retriable error trying to disable table=" + tableName +
+          " (in state=" + state + ")", e);
+      }
     }
     return Flow.HAS_MORE_STATE;
   }
@@ -119,34 +116,31 @@ public class ModifyColumnFamilyProcedure
   @Override
   protected void rollbackState(final MasterProcedureEnv env, final ModifyColumnFamilyState state)
       throws IOException {
-    if (isTraceEnabled()) {
-      LOG.trace(this + " rollback state=" + state);
+    if (state == ModifyColumnFamilyState.MODIFY_COLUMN_FAMILY_PREPARE ||
+        state == ModifyColumnFamilyState.MODIFY_COLUMN_FAMILY_PRE_OPERATION) {
+      // nothing to rollback, pre-modify is just checks.
+      // TODO: coprocessor rollback semantic is still undefined.
+      return;
     }
-    try {
-      switch (state) {
-      case MODIFY_COLUMN_FAMILY_REOPEN_ALL_REGIONS:
-        break; // Nothing to undo.
-      case MODIFY_COLUMN_FAMILY_POST_OPERATION:
-        // TODO-MAYBE: call the coprocessor event to undo?
-        break;
-      case MODIFY_COLUMN_FAMILY_UPDATE_TABLE_DESCRIPTOR:
-        restoreTableDescriptor(env);
-        break;
+
+    // The delete doesn't have a rollback. The execution will succeed, at some point.
+    throw new UnsupportedOperationException("unhandled state=" + state);
+  }
+
+  @Override
+  protected boolean isRollbackSupported(final ModifyColumnFamilyState state) {
+    switch (state) {
       case MODIFY_COLUMN_FAMILY_PRE_OPERATION:
-        // TODO-MAYBE: call the coprocessor event to undo?
-        break;
       case MODIFY_COLUMN_FAMILY_PREPARE:
-        break; // nothing to do
+        return true;
       default:
-        throw new UnsupportedOperationException(this + " unhandled state=" + state);
-      }
-    } catch (IOException e) {
-      // This will be retried. Unless there is a bug in the code,
-      // this should be just a "temporary error" (e.g. network down)
-      LOG.warn("Failed rollback attempt step " + state + " for adding the column family"
-          + getColumnFamilyName() + " to the table " + tableName, e);
-      throw e;
+        return false;
     }
+  }
+
+  @Override
+  protected void completionCleanup(final MasterProcedureEnv env) {
+    releaseSyncLatch();
   }
 
   @Override
@@ -165,38 +159,12 @@ public class ModifyColumnFamilyProcedure
   }
 
   @Override
-  protected void setNextState(ModifyColumnFamilyState state) {
-    if (aborted.get()) {
-      setAbortFailure("modify-columnfamily", "abort requested");
-    } else {
-      super.setNextState(state);
-    }
-  }
-
-  @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    aborted.set(true);
-    return true;
-  }
-
-  @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, tableName);
-  }
-
-  @Override
-  protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, tableName);
-  }
-
-  @Override
   public void serializeStateData(final OutputStream stream) throws IOException {
     super.serializeStateData(stream);
 
     MasterProcedureProtos.ModifyColumnFamilyStateData.Builder modifyCFMsg =
         MasterProcedureProtos.ModifyColumnFamilyStateData.newBuilder()
-            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(user))
+            .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
             .setTableName(ProtobufUtil.toProtoTableName(tableName))
             .setColumnfamilySchema(ProtobufUtil.convertToColumnFamilySchema(cfDescriptor));
     if (unmodifiedHTableDescriptor != null) {
@@ -213,7 +181,7 @@ public class ModifyColumnFamilyProcedure
 
     MasterProcedureProtos.ModifyColumnFamilyStateData modifyCFMsg =
         MasterProcedureProtos.ModifyColumnFamilyStateData.parseDelimitedFrom(stream);
-    user = MasterProcedureUtil.toUserInfo(modifyCFMsg.getUserInfo());
+    setUser(MasterProcedureUtil.toUserInfo(modifyCFMsg.getUserInfo()));
     tableName = ProtobufUtil.toTableName(modifyCFMsg.getTableName());
     cfDescriptor = ProtobufUtil.convertToHColumnDesc(modifyCFMsg.getColumnfamilySchema());
     if (modifyCFMsg.hasUnmodifiedTableSchema()) {
@@ -252,7 +220,7 @@ public class ModifyColumnFamilyProcedure
    */
   private void prepareModify(final MasterProcedureEnv env) throws IOException {
     // Checks whether the table is allowed to be modified.
-    MasterDDLOperationHelper.checkTableModifiable(env, tableName);
+    checkTableModifiable(env);
 
     unmodifiedHTableDescriptor = env.getMasterServices().getTableDescriptors().get(tableName);
     if (unmodifiedHTableDescriptor == null) {
@@ -359,22 +327,16 @@ public class ModifyColumnFamilyProcedure
       final ModifyColumnFamilyState state) throws IOException, InterruptedException {
     final MasterCoprocessorHost cpHost = env.getMasterCoprocessorHost();
     if (cpHost != null) {
-      user.doAs(new PrivilegedExceptionAction<Void>() {
-        @Override
-        public Void run() throws Exception {
-          switch (state) {
-          case MODIFY_COLUMN_FAMILY_PRE_OPERATION:
-            cpHost.preModifyColumnFamilyAction(tableName, cfDescriptor);
-            break;
-          case MODIFY_COLUMN_FAMILY_POST_OPERATION:
-            cpHost.postCompletedModifyColumnFamilyAction(tableName, cfDescriptor);
-            break;
-          default:
-            throw new UnsupportedOperationException(this + " unhandled state=" + state);
-          }
-          return null;
-        }
-      });
+      switch (state) {
+        case MODIFY_COLUMN_FAMILY_PRE_OPERATION:
+          cpHost.preModifyColumnFamilyAction(tableName, cfDescriptor, getUser());
+          break;
+        case MODIFY_COLUMN_FAMILY_POST_OPERATION:
+          cpHost.postCompletedModifyColumnFamilyAction(tableName, cfDescriptor, getUser());
+          break;
+        default:
+          throw new UnsupportedOperationException(this + " unhandled state=" + state);
+      }
     }
   }
 }
