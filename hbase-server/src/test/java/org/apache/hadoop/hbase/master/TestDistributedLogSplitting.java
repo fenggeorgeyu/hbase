@@ -89,7 +89,6 @@ import org.apache.hadoop.hbase.master.SplitLogManager.TaskBatch;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -101,9 +100,9 @@ import org.apache.hadoop.hbase.util.JVMClusterUtil.MasterThread;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
-import org.apache.hadoop.hbase.wal.FSHLogProvider;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
@@ -321,7 +320,9 @@ public class TestDistributedLogSplitting {
     }
   }
 
-  private static class NonceGeneratorWithDups extends PerClientRandomNonceGenerator {
+  private static class NonceGeneratorWithDups implements NonceGenerator {
+
+    private final PerClientRandomNonceGenerator delegate = PerClientRandomNonceGenerator.get();
     private boolean isDups = false;
     private LinkedList<Long> nonces = new LinkedList<Long>();
 
@@ -331,11 +332,16 @@ public class TestDistributedLogSplitting {
 
     @Override
     public long newNonce() {
-      long nonce = isDups ? nonces.removeFirst() : super.newNonce();
+      long nonce = isDups ? nonces.removeFirst() : delegate.newNonce();
       if (!isDups) {
         nonces.add(nonce);
       }
       return nonce;
+    }
+
+    @Override
+    public long getNonceGroup() {
+      return delegate.getNonceGroup();
     }
   }
 
@@ -1301,8 +1307,8 @@ public class TestDistributedLogSplitting {
         WALEdit e = new WALEdit();
         value++;
         e.add(new KeyValue(row, family, qualifier, timeStamp, Bytes.toBytes(value)));
-        wal.append(curRegionInfo, new HLogKey(curRegionInfo.getEncodedNameAsBytes(), tableName,
-            System.currentTimeMillis(), null), e, true);
+        wal.append(curRegionInfo, new WALKey(curRegionInfo.getEncodedNameAsBytes(), tableName,
+            System.currentTimeMillis()), e, true);
       }
       wal.sync();
       wal.shutdown();
@@ -1396,7 +1402,7 @@ public class TestDistributedLogSplitting {
         WALEdit e = new WALEdit();
         value++;
         e.add(new KeyValue(row, family, qualifier, timeStamp, Bytes.toBytes(value)));
-        wal.append(curRegionInfo, new HLogKey(curRegionInfo.getEncodedNameAsBytes(),
+        wal.append(curRegionInfo, new WALKey(curRegionInfo.getEncodedNameAsBytes(),
             tableName, System.currentTimeMillis()), e, true);
       }
       wal.sync();
@@ -1610,7 +1616,7 @@ public class TestDistributedLogSplitting {
         byte[] qualifier = Bytes.toBytes("c" + Integer.toString(i));
         e.add(new KeyValue(row, family, qualifier, System.currentTimeMillis(), value));
         log.append(curRegionInfo,
-            new HLogKey(curRegionInfo.getEncodedNameAsBytes(), fullTName,
+            new WALKey(curRegionInfo.getEncodedNameAsBytes(), fullTName,
                 System.currentTimeMillis()), e, true);
         if (0 == i % syncEvery) {
           log.sync();

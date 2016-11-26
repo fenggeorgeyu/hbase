@@ -1341,7 +1341,16 @@ public class AccessController extends BaseMasterAndRegionObserver
   public void preCloneSnapshot(final ObserverContext<MasterCoprocessorEnvironment> ctx,
       final SnapshotDescription snapshot, final HTableDescriptor hTableDescriptor)
       throws IOException {
-    requirePermission(getActiveUser(ctx), "cloneSnapshot " + snapshot.getName(), Action.ADMIN);
+    User user = getActiveUser(ctx);
+    if (SnapshotDescriptionUtils.isSnapshotOwner(snapshot, user)
+        && hTableDescriptor.getNameAsString().equals(snapshot.getTable())) {
+      // Snapshot owner is allowed to create a table with the same name as the snapshot he took
+      AuthResult result = AuthResult.allow("cloneSnapshot " + snapshot.getName(),
+        "Snapshot owner check allowed", user, null, hTableDescriptor.getTableName(), null);
+      logResult(result);
+    } else {
+      requirePermission(user, "cloneSnapshot " + snapshot.getName(), Action.ADMIN);
+    }
   }
 
   @Override
@@ -1437,6 +1446,14 @@ public class AccessController extends BaseMasterAndRegionObserver
         Action.ADMIN, Action.CREATE);
   }
 
+  @Override
+  public void preSplitRegion(
+      final ObserverContext<MasterCoprocessorEnvironment> ctx,
+      final TableName tableName,
+      final byte[] splitRow) throws IOException {
+    requirePermission(getActiveUser(ctx), "split", tableName, null, null, Action.ADMIN);
+  }
+
   /* ---- RegionObserver implementation ---- */
 
   @Override
@@ -1498,19 +1515,6 @@ public class AccessController extends BaseMasterAndRegionObserver
   public void preFlush(ObserverContext<RegionCoprocessorEnvironment> c) throws IOException {
     requirePermission(getActiveUser(c), "flush", getTableName(c.getEnvironment()), null, null,
         Action.ADMIN, Action.CREATE);
-  }
-
-  @Override
-  public void preSplit(ObserverContext<RegionCoprocessorEnvironment> c) throws IOException {
-    requirePermission(getActiveUser(c), "split", getTableName(c.getEnvironment()), null, null,
-        Action.ADMIN);
-  }
-
-  @Override
-  public void preSplit(ObserverContext<RegionCoprocessorEnvironment> c,
-      byte[] splitRow) throws IOException {
-    requirePermission(getActiveUser(c), "split", getTableName(c.getEnvironment()), null, null,
-        Action.ADMIN);
   }
 
   @Override

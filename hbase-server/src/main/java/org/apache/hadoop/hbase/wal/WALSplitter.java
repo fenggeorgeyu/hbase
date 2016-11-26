@@ -18,6 +18,10 @@
  */
 package org.apache.hadoop.hbase.wal;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+
 import java.io.EOFException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -88,7 +92,6 @@ import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.LastSequenceId;
 import org.apache.hadoop.hbase.regionserver.wal.AbstractFSWAL;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALCellCodec;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.regionserver.wal.WALEditsReplaySink;
@@ -118,10 +121,6 @@ import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.ipc.RemoteException;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 
 /**
  * This class is responsible for splitting up a bunch of regionserver commit log
@@ -298,13 +297,7 @@ public class WALSplitter {
         progress_failed = true;
         return false;
       }
-      try {
-        in = getReader(logfile, skipErrors, reporter);
-      } catch (CorruptedLogFileException e) {
-        LOG.warn("Could not get reader, corrupted log file " + logPath, e);
-        ZKSplitLog.markCorrupted(rootDir, logfile.getPath().getName(), fs);
-        isCorrupted = true;
-      }
+      in = getReader(logfile, skipErrors, reporter);
       if (in == null) {
         LOG.warn("Nothing to split in log file " + logPath);
         return true;
@@ -358,7 +351,7 @@ public class WALSplitter {
           continue;
         }
         // Don't send Compaction/Close/Open region events to recovered edit type sinks.
-        if (entry.getEdit().isMetaEdit() && !outputSink.keepRegionEvents()) {
+        if (entry.getEdit().isMetaEdit() && !outputSink.keepRegionEvent(entry)) {
           editsSkipped++;
           continue;
         }
@@ -388,6 +381,9 @@ public class WALSplitter {
         // Some tests pass in a csm of null.
         this.csm.getSplitLogWorkerCoordination().markCorrupted(rootDir,
           logfile.getPath().getName(), fs);
+      } else {
+        // for tests only
+        ZKSplitLog.markCorrupted(rootDir, logfile.getPath().getName(), fs);
       }
       isCorrupted = true;
     } catch (IOException e) {
@@ -1277,12 +1273,11 @@ public class WALSplitter {
 
     /**
      * Some WALEdit's contain only KV's for account on what happened to a region.
-     * Not all sinks will want to get those edits.
+     * Not all sinks will want to get all of those edits.
      *
-     * @return Return true if this sink wants to get all WALEdit's regardless of if it's a region
-     * event.
+     * @return Return true if this sink wants to accept this region-level WALEdit.
      */
-    public abstract boolean keepRegionEvents();
+    public abstract boolean keepRegionEvent(Entry entry);
   }
 
   /**
@@ -1627,7 +1622,13 @@ public class WALSplitter {
     }
 
     @Override
-    public boolean keepRegionEvents() {
+    public boolean keepRegionEvent(Entry entry) {
+      ArrayList<Cell> cells = entry.getEdit().getCells();
+      for (int i = 0; i < cells.size(); i++) {
+        if (WALEdit.isCompactionMarker(cells.get(i))) {
+          return true;
+        }
+      }
       return false;
     }
 
@@ -2082,7 +2083,7 @@ public class WALSplitter {
     }
 
     @Override
-    public boolean keepRegionEvents() {
+    public boolean keepRegionEvent(Entry entry) {
       return true;
     }
 
@@ -2370,8 +2371,7 @@ public class WALSplitter {
       for (HBaseProtos.UUID uuid : entry.getKey().getClusterIdsList()) {
         clusterIds.add(new UUID(uuid.getMostSigBits(), uuid.getLeastSigBits()));
       }
-      // we use HLogKey here instead of WALKey directly to support legacy coprocessors.
-      key = new HLogKey(walKeyProto.getEncodedRegionName().toByteArray(), TableName.valueOf(
+      key = new WALKey(walKeyProto.getEncodedRegionName().toByteArray(), TableName.valueOf(
               walKeyProto.getTableName().toByteArray()), replaySeqId, walKeyProto.getWriteTime(),
               clusterIds, walKeyProto.getNonceGroup(), walKeyProto.getNonce(), null);
       logEntry.setFirst(key);

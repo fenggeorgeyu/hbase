@@ -191,6 +191,10 @@ public class MasterProcedureScheduler extends AbstractProcedureScheduler {
       serverBuckets[i] = null;
     }
 
+    // Remove Namespaces
+    clear(namespaceMap, null, NAMESPACE_QUEUE_KEY_COMPARATOR);
+    namespaceMap = null;
+
     // Remove Tables
     clear(tableMap, tableRunQueue, TABLE_QUEUE_KEY_COMPARATOR);
     tableMap = null;
@@ -204,12 +208,12 @@ public class MasterProcedureScheduler extends AbstractProcedureScheduler {
       Queue<T> node = AvlTree.getFirst(treeMap);
       assert !node.isSuspended() : "can't clear suspended " + node.getKey();
       treeMap = AvlTree.remove(treeMap, node.getKey(), comparator);
-      removeFromRunQueue(fairq, node);
+      if (fairq != null) removeFromRunQueue(fairq, node);
     }
   }
 
   @Override
-  public int queueSize() {
+  protected int queueSize() {
     int count = 0;
 
     // Server queues
@@ -1117,7 +1121,8 @@ public class MasterProcedureScheduler extends AbstractProcedureScheduler {
     }
 
     public synchronized boolean hasParentLock(final Procedure proc) {
-      return proc.hasParent() && isLockOwner(proc.getParentProcId());
+      return proc.hasParent() &&
+        (isLockOwner(proc.getParentProcId()) || isLockOwner(proc.getRootProcId()));
     }
 
     public synchronized boolean hasLockAccess(final Procedure proc) {
@@ -1155,7 +1160,9 @@ public class MasterProcedureScheduler extends AbstractProcedureScheduler {
     @Override
     public String toString() {
       return String.format("%s(%s, suspended=%s xlock=%s sharedLock=%s size=%s)",
-        getClass().getSimpleName(), key, isSuspended(), hasExclusiveLock(), sharedLock, size());
+          getClass().getSimpleName(), key, isSuspended(),
+          hasExclusiveLock() ? "true (" + exclusiveLockProcIdOwner + ")" : "false",
+          sharedLock, size());
     }
   }
 

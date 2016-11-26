@@ -31,6 +31,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.master.TableLockManager;
 import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility.TestProcedure;
+import org.apache.hadoop.hbase.procedure2.util.StringUtils;
 import org.apache.hadoop.hbase.util.AbstractHBaseTool;
 import org.apache.hadoop.hbase.util.Bytes;
 
@@ -66,7 +67,7 @@ public class MasterProcedureSchedulerPerformanceEvaluation extends AbstractHBase
   private int regionsPerTable;
   private int numOps;
   private int numThreads;
-  private String ops_type;
+  private String opsType;
 
   private MasterProcedureScheduler procedureScheduler;
   // List of table/region procedures to schedule.
@@ -147,13 +148,13 @@ public class MasterProcedureSchedulerPerformanceEvaluation extends AbstractHBase
       }
     }
 
-    if (ops_type.equals("table")) {
+    if (opsType.equals("table")) {
       System.out.println("Operations: table only");
       ops = tableOps;
-    } else if (ops_type.equals("region")) {
+    } else if (opsType.equals("region")) {
       System.out.println("Operations: region only");
       ops = regionOps;
-    } else if (ops_type.equals("both")) {
+    } else if (opsType.equals("both")) {
       System.out.println("Operations: both (table + region)");
       ops = (ProcedureFactory[])ArrayUtils.addAll(tableOps, regionOps);
     } else {
@@ -178,7 +179,7 @@ public class MasterProcedureSchedulerPerformanceEvaluation extends AbstractHBase
     numOps = getOptionAsInt(cmd, NUM_OPERATIONS_OPTION.getOpt(),
         DEFAULT_NUM_OPERATIONS);
     numThreads = getOptionAsInt(cmd, NUM_THREADS_OPTION.getOpt(), DEFAULT_NUM_THREADS);
-    ops_type = cmd.getOptionValue(OPS_TYPE_OPTION.getOpt(), DEFAULT_OPS_TYPE);
+    opsType = cmd.getOptionValue(OPS_TYPE_OPTION.getOpt(), DEFAULT_OPS_TYPE);
   }
 
   /*******************
@@ -244,24 +245,29 @@ public class MasterProcedureSchedulerPerformanceEvaluation extends AbstractHBase
   protected int doWork() throws Exception {
     procedureScheduler = new MasterProcedureScheduler(
         UTIL.getConfiguration(), new TableLockManager.NullTableLockManager());
+    procedureScheduler.start();
     setupOperations();
 
     final Thread[] threads = new Thread[numThreads];
     for (int i = 0; i < numThreads; ++i) {
       threads[i] = new AddProcsWorker();
     }
-    final float addBackTime = runThreads(threads) / 1000.0f;
+    final long addBackTime = runThreads(threads);
     System.out.println("Added " + numOps + " procedures to scheduler.");
 
     for (int i = 0; i < numThreads; ++i) {
       threads[i] = new PollAndLockWorker();
     }
-    final float pollTime = runThreads(threads) / 1000.0f;
+    final long pollTime = runThreads(threads);
+    procedureScheduler.stop();
+
+    final float pollTimeSec = pollTime / 1000.0f;
+    final float addBackTimeSec = addBackTime / 1000.0f;
     System.out.println("******************************************");
-    System.out.println("Time - addBack     : " + addBackTime + "sec");
-    System.out.println("Ops/sec - addBack  : " + ((float)numOps / addBackTime));
-    System.out.println("Time - poll        : " + pollTime + "sec");
-    System.out.println("Ops/sec - poll     : " + ((float)numOps / pollTime));
+    System.out.println("Time - addBack     : " + StringUtils.humanTimeDiff(addBackTime));
+    System.out.println("Ops/sec - addBack  : " + StringUtils.humanSize(numOps / addBackTimeSec));
+    System.out.println("Time - poll        : " + StringUtils.humanTimeDiff(pollTime));
+    System.out.println("Ops/sec - poll     : " + StringUtils.humanSize(numOps / pollTimeSec));
     System.out.println("Num Operations     : " + numOps);
     System.out.println();
     System.out.println("Completed          : " + completed.get());
@@ -269,9 +275,15 @@ public class MasterProcedureSchedulerPerformanceEvaluation extends AbstractHBase
     System.out.println();
     System.out.println("Num Tables         : " + numTables);
     System.out.println("Regions per table  : " + regionsPerTable);
-    System.out.println("Operations type    : " + ops_type);
+    System.out.println("Operations type    : " + opsType);
     System.out.println("Threads            : " + numThreads);
     System.out.println("******************************************");
+    System.out.println("Raw format for scripts");
+    System.out.println(String.format("RESULT [%s=%s, %s=%s, %s=%s, %s=%s, %s=%s, "
+            + "num_yield=%s, time_addback_ms=%s, time_poll_ms=%s]",
+        NUM_OPERATIONS_OPTION.getOpt(), numOps, OPS_TYPE_OPTION.getOpt(), opsType,
+        NUM_TABLES_OPTION.getOpt(), numTables, REGIONS_PER_TABLE_OPTION.getOpt(), regionsPerTable,
+        NUM_THREADS_OPTION.getOpt(), numThreads, yield.get(), addBackTime, pollTime));
     return 0;
   }
 

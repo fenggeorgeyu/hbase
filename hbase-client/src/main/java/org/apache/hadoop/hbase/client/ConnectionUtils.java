@@ -17,28 +17,47 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import static org.apache.hadoop.hbase.HConstants.EMPTY_END_ROW;
+import static org.apache.hadoop.hbase.HConstants.EMPTY_START_ROW;
+
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 
 import java.io.IOException;
+import java.lang.reflect.UndeclaredThrowableException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ClientService;
+import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
+import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ClientService;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.ipc.RemoteException;
 
 /**
  * Utility used by client connections.
  */
 @InterfaceAudience.Private
 public final class ConnectionUtils {
+
+  private static final Log LOG = LogFactory.getLog(ConnectionUtils.class);
 
   private ConnectionUtils() {}
 
@@ -166,5 +185,143 @@ public final class ConnectionUtils {
       // treat all tables as enabled
       return false;
     }
+  }
+
+  /**
+   * Return retires + 1. The returned value will be in range [1, Integer.MAX_VALUE].
+   */
+  static int retries2Attempts(int retries) {
+    return Math.max(1, retries == Integer.MAX_VALUE ? Integer.MAX_VALUE : retries + 1);
+  }
+
+  /**
+   * Get a unique key for the rpc stub to the given server.
+   */
+  static String getStubKey(String serviceName, ServerName serverName,
+      boolean hostnameCanChange) {
+    // Sometimes, servers go down and they come back up with the same hostname but a different
+    // IP address. Force a resolution of the rsHostname by trying to instantiate an
+    // InetSocketAddress, and this way we will rightfully get a new stubKey.
+    // Also, include the hostname in the key so as to take care of those cases where the
+    // DNS name is different but IP address remains the same.
+    String hostname = serverName.getHostname();
+    int port = serverName.getPort();
+    if (hostnameCanChange) {
+      try {
+        InetAddress ip = InetAddress.getByName(hostname);
+        return serviceName + "@" + hostname + "-" + ip.getHostAddress() + ":" + port;
+      } catch (UnknownHostException e) {
+        LOG.warn("Can not resolve " + hostname + ", please check your network", e);
+      }
+    }
+    return serviceName + "@" + hostname + ":" + port;
+  }
+
+  static void checkHasFamilies(Mutation mutation) {
+    Preconditions.checkArgument(mutation.numFamilies() > 0,
+      "Invalid arguments to %s, zero columns specified", mutation.toString());
+  }
+
+  /** Dummy nonce generator for disabled nonces. */
+  static final NonceGenerator NO_NONCE_GENERATOR = new NonceGenerator() {
+
+    @Override
+    public long newNonce() {
+      return HConstants.NO_NONCE;
+    }
+
+    @Override
+    public long getNonceGroup() {
+      return HConstants.NO_NONCE;
+    }
+  };
+
+  // A byte array in which all elements are the max byte, and it is used to
+  // construct closest front row
+  static final byte[] MAX_BYTE_ARRAY = Bytes.createMaxByteArray(9);
+
+  /**
+   * Create the closest row after the specified row
+   */
+  static byte[] createClosestRowAfter(byte[] row) {
+    return Arrays.copyOf(row, row.length + 1);
+  }
+
+  /**
+   * Create the closest row before the specified row
+   */
+  static byte[] createClosestRowBefore(byte[] row) {
+    if (row.length == 0) {
+      return MAX_BYTE_ARRAY;
+    }
+    if (row[row.length - 1] == 0) {
+      return Arrays.copyOf(row, row.length - 1);
+    } else {
+      byte[] nextRow = new byte[row.length + MAX_BYTE_ARRAY.length];
+      System.arraycopy(row, 0, nextRow, 0, row.length - 1);
+      nextRow[row.length - 1] = (byte) ((row[row.length - 1] & 0xFF) - 1);
+      System.arraycopy(MAX_BYTE_ARRAY, 0, nextRow, row.length, MAX_BYTE_ARRAY.length);
+      return nextRow;
+    }
+  }
+
+  static boolean isEmptyStartRow(byte[] row) {
+    return Bytes.equals(row, EMPTY_START_ROW);
+  }
+
+  static boolean isEmptyStopRow(byte[] row) {
+    return Bytes.equals(row, EMPTY_END_ROW);
+  }
+
+  static void resetController(HBaseRpcController controller, long timeoutNs) {
+    controller.reset();
+    if (timeoutNs >= 0) {
+      controller.setCallTimeout(
+        (int) Math.min(Integer.MAX_VALUE, TimeUnit.NANOSECONDS.toMillis(timeoutNs)));
+    }
+  }
+
+  static Throwable translateException(Throwable t) {
+    if (t instanceof UndeclaredThrowableException && t.getCause() != null) {
+      t = t.getCause();
+    }
+    if (t instanceof RemoteException) {
+      t = ((RemoteException) t).unwrapRemoteException();
+    }
+    if (t instanceof ServiceException && t.getCause() != null) {
+      t = translateException(t.getCause());
+    }
+    return t;
+  }
+
+  static long calcEstimatedSize(Result rs) {
+    long estimatedHeapSizeOfResult = 0;
+    // We don't make Iterator here
+    for (Cell cell : rs.rawCells()) {
+      estimatedHeapSizeOfResult += CellUtil.estimatedHeapSizeOf(cell);
+    }
+    return estimatedHeapSizeOfResult;
+  }
+
+  static Result filterCells(Result result, Cell keepCellsAfter) {
+    // not the same row
+    if (!CellUtil.matchingRow(keepCellsAfter, result.getRow(), 0, result.getRow().length)) {
+      return result;
+    }
+    Cell[] rawCells = result.rawCells();
+    int index = Arrays.binarySearch(rawCells, keepCellsAfter, CellComparator::compareWithoutRow);
+    if (index < 0) {
+      index = -index - 1;
+    } else {
+      index++;
+    }
+    if (index == 0) {
+      return result;
+    }
+    if (index == rawCells.length) {
+      return null;
+    }
+    return Result.create(Arrays.copyOfRange(rawCells, index, rawCells.length), null,
+      result.isStale(), true);
   }
 }

@@ -111,6 +111,7 @@ import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.procedure.ModifyColumnFamilyProcedure;
 import org.apache.hadoop.hbase.master.procedure.ModifyTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.ProcedurePrepareLatch;
+import org.apache.hadoop.hbase.master.procedure.SplitTableRegionProcedure;
 import org.apache.hadoop.hbase.master.procedure.TruncateTableProcedure;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotManager;
 import org.apache.hadoop.hbase.mob.MobConstants;
@@ -405,7 +406,7 @@ public class HMaster extends HRegionServer implements MasterServices {
     this.rsFatals = new MemoryBoundedLogMessageBuffer(
       conf.getLong("hbase.master.buffer.for.rs.fatals", 1*1024*1024));
 
-    LOG.info("hbase.rootdir=" + FSUtils.getRootDir(this.conf) +
+    LOG.info("hbase.rootdir=" + getRootDir() +
       ", hbase.cluster.distributed=" + this.conf.getBoolean(HConstants.CLUSTER_DISTRIBUTED, false));
 
     // Disable usage of meta replicas in the master
@@ -665,7 +666,8 @@ public class HMaster extends HRegionServer implements MasterServices {
       throws IOException, InterruptedException, KeeperException, CoordinatedStateException {
 
     isActiveMaster = true;
-    Thread zombieDetector = new Thread(new InitializationMonitor(this));
+    Thread zombieDetector = new Thread(new InitializationMonitor(this),
+        "ActiveMasterInitializationMonitor-" + System.currentTimeMillis());
     zombieDetector.start();
 
     /*
@@ -742,8 +744,8 @@ public class HMaster extends HRegionServer implements MasterServices {
     }
 
     //initialize load balancer
-    this.balancer.setClusterStatus(getClusterStatus());
     this.balancer.setMasterServices(this);
+    this.balancer.setClusterStatus(getClusterStatus());
     this.balancer.initialize();
 
     // Check if master is shutting down because of some issue
@@ -1035,6 +1037,7 @@ public class HMaster extends HRegionServer implements MasterServices {
     procedureStore.registerListener(new MasterProcedureEnv.MasterProcedureStoreListener(this));
     procedureExecutor = new ProcedureExecutor(conf, procEnv, procedureStore,
         procEnv.getProcedureQueue());
+    configurationManager.registerObserver(procEnv);
 
     final int numThreads = conf.getInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS,
         Math.max(Runtime.getRuntime().availableProcessors(),
@@ -1048,6 +1051,7 @@ public class HMaster extends HRegionServer implements MasterServices {
 
   private void stopProcedureExecutor() {
     if (procedureExecutor != null) {
+      configurationManager.deregisterObserver(procedureExecutor.getEnvironment());
       procedureExecutor.stop();
     }
 
@@ -1347,6 +1351,28 @@ public class HMaster extends HRegionServer implements MasterServices {
     if (cpHost != null) {
       cpHost.postDispatchMerge(regionInfoA, regionInfoB);
     }
+    return procId;
+  }
+
+  @Override
+  public long splitRegion(
+      final HRegionInfo regionInfo,
+      final byte[] splitRow,
+      final long nonceGroup,
+      final long nonce) throws IOException {
+    checkInitialized();
+
+    if (cpHost != null) {
+      cpHost.preSplitRegion(regionInfo.getTable(), splitRow);
+    }
+
+    LOG.info(getClientIdAuditPrefix() + " Split region " + regionInfo);
+
+    // Execute the operation asynchronously
+    long procId = this.procedureExecutor.submitProcedure(
+      new SplitTableRegionProcedure(procedureExecutor.getEnvironment(), regionInfo, splitRow),
+      nonceGroup, nonce);
+
     return procId;
   }
 
@@ -2449,6 +2475,7 @@ public class HMaster extends HRegionServer implements MasterServices {
    * @see org.apache.hadoop.hbase.master.HMasterCommandLine
    */
   public static void main(String [] args) {
+    LOG.info("***** STARTING service '" + HMaster.class.getSimpleName() + "' *****");
     VersionInfo.logVersion();
     new HMasterCommandLine(HMaster.class).doMain(args);
   }

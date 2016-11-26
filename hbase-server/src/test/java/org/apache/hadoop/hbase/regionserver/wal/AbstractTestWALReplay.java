@@ -80,7 +80,9 @@ import org.apache.hadoop.hbase.regionserver.FlushRequestListener;
 import org.apache.hadoop.hbase.regionserver.FlushRequester;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.MemStoreSnapshot;
+import org.apache.hadoop.hbase.regionserver.MemstoreSize;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
@@ -95,8 +97,6 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.HFileTestUtil;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
-import org.apache.hadoop.hbase.wal.AsyncFSWALProvider;
-import org.apache.hadoop.hbase.wal.FSHLogProvider;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hbase.wal.WALKey;
@@ -374,12 +374,12 @@ public abstract class AbstractTestWALReplay {
     Path f =  new Path(basedir, "hfile");
     HFileTestUtil.createHFile(this.conf, fs, f, family, family, Bytes.toBytes(""),
         Bytes.toBytes("z"), 10);
-    List <Pair<byte[],String>>  hfs= new ArrayList<Pair<byte[],String>>(1);
+    List<Pair<byte[], String>> hfs = new ArrayList<Pair<byte[], String>>(1);
     hfs.add(Pair.newPair(family, f.toString()));
     region.bulkLoadHFiles(hfs, true, null);
 
     // Add an edit so something in the WAL
-    byte [] row = tableName.getName();
+    byte[] row = tableName.getName();
     region.put((new Put(row)).addColumn(family, family, family));
     wal.sync();
     final int rowsInsertedCount = 11;
@@ -551,7 +551,7 @@ public abstract class AbstractTestWALReplay {
     final Configuration newConf = HBaseConfiguration.create(this.conf);
     User user = HBaseTestingUtility.getDifferentUser(newConf,
       tableName.getNameAsString());
-    user.runAs(new PrivilegedExceptionAction() {
+    user.runAs(new PrivilegedExceptionAction<Object>() {
       @Override
       public Object run() throws Exception {
         runWALSplit(newConf);
@@ -561,10 +561,9 @@ public abstract class AbstractTestWALReplay {
         final AtomicInteger countOfRestoredEdits = new AtomicInteger(0);
         HRegion region3 = new HRegion(basedir, wal3, newFS, newConf, hri, htd, null) {
           @Override
-          protected boolean restoreEdit(Store s, Cell cell) {
-            boolean b = super.restoreEdit(s, cell);
+          protected void restoreEdit(HStore s, Cell cell, MemstoreSize memstoreSize) {
+            super.restoreEdit(s, cell, memstoreSize);
             countOfRestoredEdits.incrementAndGet();
-            return b;
           }
         };
         long seqid3 = region3.initialize();

@@ -77,7 +77,7 @@ public abstract class Compactor<T extends CellSink> {
   protected final Compression.Algorithm compactionCompression;
 
   /** specify how many days to keep MVCC values during major compaction **/ 
-  protected final int keepSeqIdPeriod;
+  protected int keepSeqIdPeriod;
 
   //TODO: depending on Store is not good but, realistically, all compactors currently do.
   Compactor(final Configuration conf, final Store store) {
@@ -276,7 +276,11 @@ public abstract class Compactor<T extends CellSink> {
       // HFiles, and their readers
       readersToClose = new ArrayList<StoreFile>(request.getFiles().size());
       for (StoreFile f : request.getFiles()) {
-        readersToClose.add(f.cloneForReader());
+        StoreFile clonedStoreFile = f.cloneForReader();
+        // create the reader after the store file is cloned in case
+        // the sequence id is used for sorting in scanners
+        clonedStoreFile.createReader();
+        readersToClose.add(clonedStoreFile);
       }
       scanners = createFileScanners(readersToClose, smallestReadPoint,
         store.throttleCompaction(request.getSize()));
@@ -290,7 +294,8 @@ public abstract class Compactor<T extends CellSink> {
     try {
       /* Include deletes, unless we are doing a major compaction */
       ScanType scanType = scannerFactory.getScanType(request);
-      scanner = preCreateCoprocScanner(request, scanType, fd.earliestPutTs, scanners);
+      scanner = preCreateCoprocScanner(request, scanType, fd.earliestPutTs, scanners, user,
+        smallestReadPoint);
       if (scanner == null) {
         scanner = scannerFactory.createScanner(scanners, scanType, fd, smallestReadPoint);
       }
@@ -340,21 +345,18 @@ public abstract class Compactor<T extends CellSink> {
    * @param scanType Scan type.
    * @param earliestPutTs Earliest put ts.
    * @param scanners File scanners for compaction files.
+   * @param user the User
+   * @param readPoint the read point to help create scanner by Coprocessor if required.
    * @return Scanner override by coprocessor; null if not overriding.
    */
   protected InternalScanner preCreateCoprocScanner(final CompactionRequest request,
-      ScanType scanType, long earliestPutTs,  List<StoreFileScanner> scanners) throws IOException {
-    return preCreateCoprocScanner(request, scanType, earliestPutTs, scanners, null);
-  }
-
-  protected InternalScanner preCreateCoprocScanner(final CompactionRequest request,
       final ScanType scanType, final long earliestPutTs, final List<StoreFileScanner> scanners,
-      User user) throws IOException {
+      User user, final long readPoint) throws IOException {
     if (store.getCoprocessorHost() == null) {
       return null;
     }
     return store.getCoprocessorHost().preCompactScannerOpen(store, scanners, scanType,
-        earliestPutTs, request, user);
+        earliestPutTs, request, user, readPoint);
   }
 
   /**
@@ -415,9 +417,16 @@ public abstract class Compactor<T extends CellSink> {
           now = EnvironmentEdgeManager.currentTime();
         }
         // output to writer:
+        Cell lastCleanCell = null;
+        long lastCleanCellSeqId = 0;
         for (Cell c : cells) {
           if (cleanSeqId && c.getSequenceId() <= smallestReadPoint) {
+            lastCleanCell = c;
+            lastCleanCellSeqId = c.getSequenceId();
             CellUtil.setSequenceId(c, 0);
+          } else {
+            lastCleanCell = null;
+            lastCleanCellSeqId = 0;
           }
           writer.append(c);
           int len = KeyValueUtil.length(c);
@@ -440,6 +449,12 @@ public abstract class Compactor<T extends CellSink> {
             }
           }
           if (kvs != null && bytesWrittenProgressForShippedCall > shippedCallSizeLimit) {
+            if (lastCleanCell != null) {
+              // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly.
+              // ShipperListener will do a clone of the last cells it refer, so need to set back
+              // sequence id before ShipperListener.beforeShipped
+              CellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
+            }
             // Clone the cells that are in the writer so that they are freed of references,
             // if they are holding any.
             ((ShipperListener)writer).beforeShipped();
@@ -452,6 +467,10 @@ public abstract class Compactor<T extends CellSink> {
             kvs.shipped();
             bytesWrittenProgressForShippedCall = 0;
           }
+        }
+        if (lastCleanCell != null) {
+          // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly
+          CellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
         }
         // Log the progress of long running compactions every minute if
         // logging at DEBUG level

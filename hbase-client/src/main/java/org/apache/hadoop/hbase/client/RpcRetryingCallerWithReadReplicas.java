@@ -29,6 +29,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseIOException;
@@ -52,13 +54,15 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
  */
 @InterfaceAudience.Private
 public class RpcRetryingCallerWithReadReplicas {
+  private static final Log LOG = LogFactory.getLog(RpcRetryingCallerWithReadReplicas.class);
   protected final ExecutorService pool;
   protected final ClusterConnection cConnection;
   protected final Configuration conf;
   protected final Get get;
   protected final TableName tableName;
   protected final int timeBeforeReplicas;
-  private final int callTimeout;
+  private final int operationTimeout;
+  private final int rpcTimeout;
   private final int retries;
   private final RpcControllerFactory rpcControllerFactory;
   private final RpcRetryingCallerFactory rpcRetryingCallerFactory;
@@ -66,7 +70,7 @@ public class RpcRetryingCallerWithReadReplicas {
   public RpcRetryingCallerWithReadReplicas(
       RpcControllerFactory rpcControllerFactory, TableName tableName,
       ClusterConnection cConnection, final Get get,
-      ExecutorService pool, int retries, int callTimeout,
+      ExecutorService pool, int retries, int operationTimeout, int rpcTimeout,
       int timeBeforeReplicas) {
     this.rpcControllerFactory = rpcControllerFactory;
     this.tableName = tableName;
@@ -75,7 +79,8 @@ public class RpcRetryingCallerWithReadReplicas {
     this.get = get;
     this.pool = pool;
     this.retries = retries;
-    this.callTimeout = callTimeout;
+    this.operationTimeout = operationTimeout;
+    this.rpcTimeout = rpcTimeout;
     this.timeBeforeReplicas = timeBeforeReplicas;
     this.rpcRetryingCallerFactory = new RpcRetryingCallerFactory(conf);
   }
@@ -91,7 +96,7 @@ public class RpcRetryingCallerWithReadReplicas {
     public ReplicaRegionServerCallable(int id, HRegionLocation location) {
       super(RpcRetryingCallerWithReadReplicas.this.cConnection,
           RpcRetryingCallerWithReadReplicas.this.tableName, get.getRow(),
-          rpcControllerFactory.newController());
+          rpcControllerFactory.newController(), rpcTimeout, new RetryingTimeTracker());
       this.id = id;
       this.location = location;
     }
@@ -133,7 +138,7 @@ public class RpcRetryingCallerWithReadReplicas {
       ClientProtos.GetRequest request = RequestConverter.buildGetRequest(reg, get);
       HBaseRpcController hrc = (HBaseRpcController)getRpcController();
       hrc.reset();
-      hrc.setCallTimeout(callTimeout);
+      hrc.setCallTimeout(rpcTimeout);
       hrc.setPriority(tableName);
       ClientProtos.GetResponse response = getStub().get(hrc, request);
       if (response == null) {
@@ -169,9 +174,12 @@ public class RpcRetryingCallerWithReadReplicas {
         : RegionReplicaUtil.DEFAULT_REPLICA_ID), cConnection, tableName, get.getRow());
    final ResultBoundedCompletionService<Result> cs =
         new ResultBoundedCompletionService<Result>(this.rpcRetryingCallerFactory, pool, rl.size());
+    int startIndex = 0;
+    int endIndex = rl.size();
 
     if(isTargetReplicaSpecified) {
       addCallsForReplica(cs, rl, get.getReplicaId(), get.getReplicaId());
+      endIndex = 1;
     } else {
       addCallsForReplica(cs, rl, 0, 0);
       try {
@@ -181,7 +189,13 @@ public class RpcRetryingCallerWithReadReplicas {
           return f.get(); //great we got a response
         }
       } catch (ExecutionException e) {
-        throwEnrichedException(e, retries);
+        // We ignore the ExecutionException and continue with the secondary replicas
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Primary replica returns " + e.getCause());
+        }
+
+        // Skip the result from the primary as we know that there is something wrong
+        startIndex = 1;
       } catch (CancellationException e) {
         throw new InterruptedIOException();
       } catch (InterruptedException e) {
@@ -192,19 +206,14 @@ public class RpcRetryingCallerWithReadReplicas {
       addCallsForReplica(cs, rl, 1, rl.size() - 1);
     }
     try {
-      try {
-        long start = EnvironmentEdgeManager.currentTime();
-        Future<Result> f = cs.poll(operationTimeout, TimeUnit.MILLISECONDS);
-        long duration = EnvironmentEdgeManager.currentTime() - start;
-        if (f == null) {
-          throw new RetriesExhaustedException("timed out after " + duration + " ms");
-        }
-        return f.get(operationTimeout - duration, TimeUnit.MILLISECONDS);
-      } catch (ExecutionException e) {
-        throwEnrichedException(e, retries);
-      } catch (TimeoutException te) {
+      Future<Result> f = cs.pollForFirstSuccessfullyCompletedTask(operationTimeout,
+          TimeUnit.MILLISECONDS, startIndex, endIndex);
+      if (f == null) {
         throw new RetriesExhaustedException("timed out after " + operationTimeout + " ms");
       }
+      return f.get();
+    } catch (ExecutionException e) {
+      throwEnrichedException(e, retries);
     } catch (CancellationException e) {
       throw new InterruptedIOException();
     } catch (InterruptedException e) {
@@ -215,6 +224,7 @@ public class RpcRetryingCallerWithReadReplicas {
       cs.cancelAll();
     }
 
+    LOG.error("Imposible? Arrive at an unreachable line..."); // unreachable
     return null; // unreachable
   }
 
@@ -258,7 +268,7 @@ public class RpcRetryingCallerWithReadReplicas {
     for (int id = min; id <= max; id++) {
       HRegionLocation hrl = rl.getRegionLocation(id);
       ReplicaRegionServerCallable callOnReplica = new ReplicaRegionServerCallable(id, hrl);
-      cs.submit(callOnReplica, callTimeout, id);
+      cs.submit(callOnReplica, operationTimeout, id);
     }
   }
 

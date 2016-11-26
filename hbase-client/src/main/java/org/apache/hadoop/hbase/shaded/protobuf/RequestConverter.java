@@ -50,6 +50,8 @@ import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CompactRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.FlushRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetOnlineRegionRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionLoadRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionLoadResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetServerInfoRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionRequest;
@@ -106,6 +108,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetSplitOr
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.TruncateTableRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.UnassignRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.GetLastFlushedSequenceIdRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.SplitTableRegionRequest;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
@@ -557,10 +560,15 @@ public final class RequestConverter {
 
     List<ClientProtos.BulkLoadHFileRequest.FamilyPath> protoFamilyPaths =
         new ArrayList<ClientProtos.BulkLoadHFileRequest.FamilyPath>(familyPaths.size());
-    for(Pair<byte[], String> el: familyPaths) {
-      protoFamilyPaths.add(ClientProtos.BulkLoadHFileRequest.FamilyPath.newBuilder()
-        .setFamily(UnsafeByteOperations.unsafeWrap(el.getFirst()))
-        .setPath(el.getSecond()).build());
+    if (!familyPaths.isEmpty()) {
+      ClientProtos.BulkLoadHFileRequest.FamilyPath.Builder pathBuilder
+        = ClientProtos.BulkLoadHFileRequest.FamilyPath.newBuilder();
+      for(Pair<byte[], String> el: familyPaths) {
+        protoFamilyPaths.add(pathBuilder
+          .setFamily(UnsafeByteOperations.unsafeWrap(el.getFirst()))
+          .setPath(el.getSecond()).build());
+      }
+      pathBuilder.clear();
     }
 
     BulkLoadHFileRequest.Builder request =
@@ -587,11 +595,12 @@ public final class RequestConverter {
    * @return a multi request
    * @throws IOException
    */
-  public static <R> RegionAction.Builder buildRegionAction(final byte[] regionName,
-      final List<Action<R>> actions, final RegionAction.Builder regionActionBuilder,
+  public static RegionAction.Builder buildRegionAction(final byte[] regionName,
+      final List<Action> actions, final RegionAction.Builder regionActionBuilder,
       final ClientProtos.Action.Builder actionBuilder,
       final MutationProto.Builder mutationBuilder) throws IOException {
-    for (Action<R> action: actions) {
+    ClientProtos.CoprocessorServiceCall.Builder cpBuilder = null;
+    for (Action action: actions) {
       Row row = action.getAction();
       actionBuilder.clear();
       actionBuilder.setIndex(action.getOriginalIndex());
@@ -617,9 +626,13 @@ public final class RequestConverter {
         org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString value =
          org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations.unsafeWrap(
              exec.getRequest().toByteArray());
+        if (cpBuilder == null) {
+          cpBuilder = ClientProtos.CoprocessorServiceCall.newBuilder();
+        } else {
+          cpBuilder.clear();
+        }
         regionActionBuilder.addAction(actionBuilder.setServiceCall(
-            ClientProtos.CoprocessorServiceCall.newBuilder()
-              .setRow(UnsafeByteOperations.unsafeWrap(exec.getRow()))
+            cpBuilder.setRow(UnsafeByteOperations.unsafeWrap(exec.getRow()))
               .setServiceName(exec.getMethod().getService().getFullName())
               .setMethodName(exec.getMethod().getName())
               .setRequest(value)));
@@ -648,14 +661,15 @@ public final class RequestConverter {
    * @return a multi request that does not carry any data.
    * @throws IOException
    */
-  public static <R> RegionAction.Builder buildNoDataRegionAction(final byte[] regionName,
-      final List<Action<R>> actions, final List<CellScannable> cells,
+  public static RegionAction.Builder buildNoDataRegionAction(final byte[] regionName,
+      final List<Action> actions, final List<CellScannable> cells,
       final RegionAction.Builder regionActionBuilder,
       final ClientProtos.Action.Builder actionBuilder,
       final MutationProto.Builder mutationBuilder) throws IOException {
     RegionAction.Builder builder = getRegionActionBuilderWithRegion(
-      RegionAction.newBuilder(), regionName);
-    for (Action<R> action: actions) {
+      regionActionBuilder, regionName);
+    ClientProtos.CoprocessorServiceCall.Builder cpBuilder = null;
+    for (Action action: actions) {
       Row row = action.getAction();
       actionBuilder.clear();
       actionBuilder.setIndex(action.getOriginalIndex());
@@ -700,9 +714,13 @@ public final class RequestConverter {
         org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString value =
          org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations.unsafeWrap(
              exec.getRequest().toByteArray());
+        if (cpBuilder == null) {
+          cpBuilder = ClientProtos.CoprocessorServiceCall.newBuilder();
+        } else {
+          cpBuilder.clear();
+        }
         builder.addAction(actionBuilder.setServiceCall(
-            ClientProtos.CoprocessorServiceCall.newBuilder()
-              .setRow(UnsafeByteOperations.unsafeWrap(exec.getRow()))
+            cpBuilder.setRow(UnsafeByteOperations.unsafeWrap(exec.getRow()))
               .setServiceName(exec.getMethod().getService().getFullName())
               .setMethodName(exec.getMethod().getName())
               .setRequest(value)));
@@ -745,6 +763,20 @@ public final class RequestConverter {
     builder.setRegion(region);
     if (includeCompactionState) {
       builder.setCompactionState(includeCompactionState);
+    }
+    return builder.build();
+  }
+
+  /**
+   * Create a protocol buffer GetRegionLoadRequest for all regions/regions of a table.
+   *
+   * @param tableName the table for which regionLoad should be obtained from RS
+   * @return a protocol buffer GetRegionLoadRequest
+   */
+  public static GetRegionLoadRequest buildGetRegionLoadRequest(final TableName tableName) {
+    GetRegionLoadRequest.Builder builder = GetRegionLoadRequest.newBuilder();
+    if (tableName != null) {
+      builder.setTableName(ProtobufUtil.toProtoTableName(tableName));
     }
     return builder.build();
   }
@@ -839,18 +871,21 @@ public final class RequestConverter {
  public static UpdateFavoredNodesRequest buildUpdateFavoredNodesRequest(
      final List<Pair<HRegionInfo, List<ServerName>>> updateRegionInfos) {
    UpdateFavoredNodesRequest.Builder ubuilder = UpdateFavoredNodesRequest.newBuilder();
-   for (Pair<HRegionInfo, List<ServerName>> pair : updateRegionInfos) {
+   if (updateRegionInfos != null && !updateRegionInfos.isEmpty()) {
      RegionUpdateInfo.Builder builder = RegionUpdateInfo.newBuilder();
-     builder.setRegion(HRegionInfo.convert(pair.getFirst()));
-     for (ServerName server : pair.getSecond()) {
-       builder.addFavoredNodes(ProtobufUtil.toServerName(server));
-     }
-     ubuilder.addUpdateInfo(builder.build());
+    for (Pair<HRegionInfo, List<ServerName>> pair : updateRegionInfos) {
+      builder.setRegion(HRegionInfo.convert(pair.getFirst()));
+      for (ServerName server : pair.getSecond()) {
+        builder.addFavoredNodes(ProtobufUtil.toServerName(server));
+      }
+      ubuilder.addUpdateInfo(builder.build());
+      builder.clear();
+    }
    }
    return ubuilder.build();
  }
 
- /**
+  /**
    *  Create a WarmupRegionRequest for a given region name
    *
    *  @param regionInfo Region we are warming up
@@ -1056,6 +1091,19 @@ public final class RequestConverter {
     builder.setRegionB(buildRegionSpecifier(
         RegionSpecifierType.ENCODED_REGION_NAME, encodedNameOfRegionB));
     builder.setForcible(forcible);
+    builder.setNonceGroup(nonceGroup);
+    builder.setNonce(nonce);
+    return builder.build();
+  }
+
+  public static SplitTableRegionRequest buildSplitTableRegionRequest(
+      final HRegionInfo regionInfo,
+      final byte[] splitPoint,
+      final long nonceGroup,
+      final long nonce) {
+    SplitTableRegionRequest.Builder builder = SplitTableRegionRequest.newBuilder();
+    builder.setRegionInfo(HRegionInfo.convert(regionInfo));
+    builder.setSplitRow(UnsafeByteOperations.unsafeWrap(splitPoint));
     builder.setNonceGroup(nonceGroup);
     builder.setNonce(nonce);
     return builder.build();

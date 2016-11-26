@@ -26,6 +26,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -4449,6 +4450,30 @@ public class TestFromClientSide {
   }
 
   @Test
+  public void testBatchAppendWithReturnResultFalse() throws Exception {
+    LOG.info("Starting testBatchAppendWithReturnResultFalse");
+    final TableName TABLENAME = TableName.valueOf("testBatchAppend");
+    Table table = TEST_UTIL.createTable(TABLENAME, FAMILY);
+    Append append1 = new Append(Bytes.toBytes("row1"));
+    append1.setReturnResults(false);
+    append1.add(FAMILY, Bytes.toBytes("f1"), Bytes.toBytes("value1"));
+    Append append2 = new Append(Bytes.toBytes("row1"));
+    append2.setReturnResults(false);
+    append2.add(FAMILY, Bytes.toBytes("f1"), Bytes.toBytes("value2"));
+    List<Append> appends = new ArrayList<>();
+    appends.add(append1);
+    appends.add(append2);
+    Object[] results = new Object[2];
+    table.batch(appends, results);
+    assertTrue(results.length == 2);
+    for(Object r : results) {
+      Result result = (Result)r;
+      assertTrue(result.isEmpty());
+    }
+    table.close();
+  }
+
+  @Test
   public void testAppend() throws Exception {
     LOG.info("Starting testAppend");
     final TableName TABLENAME = TableName.valueOf("testAppend");
@@ -4462,7 +4487,7 @@ public class TestFromClientSide {
     a.add(FAMILY, QUALIFIERS[0], v1);
     a.add(FAMILY, QUALIFIERS[1], v2);
     a.setReturnResults(false);
-    assertNullResult(t.append(a));
+    assertEmptyResult(t.append(a));
 
     a = new Append(ROW);
     a.add(FAMILY, QUALIFIERS[0], v2);
@@ -5437,25 +5462,19 @@ public class TestFromClientSide {
         scanResults.add(r);
       }
     }
-    
+    assertEquals(1, scanResults.size());
     Get g = new Get(Bytes.toBytes("row"));
     g.setFilter(new FilterList());
     Result getResult = table.get(g);
-    if (scanResults.isEmpty()) {
-      assertTrue(getResult.isEmpty());
-    } else if(scanResults.size() == 1) {
-      Result scanResult = scanResults.get(0);
-      assertEquals(scanResult.rawCells().length, getResult.rawCells().length);
-      for (int i = 0; i != scanResult.rawCells().length; ++i) {
-        Cell scanCell = scanResult.rawCells()[i];
-        Cell getCell = getResult.rawCells()[i];
-        assertEquals(0, Bytes.compareTo(CellUtil.cloneRow(scanCell), CellUtil.cloneRow(getCell)));
-        assertEquals(0, Bytes.compareTo(CellUtil.cloneFamily(scanCell), CellUtil.cloneFamily(getCell)));
-        assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(scanCell), CellUtil.cloneQualifier(getCell)));
-        assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(scanCell), CellUtil.cloneValue(getCell)));
-      }
-    } else {
-      fail("The result retrieved from SCAN and Get should be same");
+    Result scanResult = scanResults.get(0);
+    assertEquals(scanResult.rawCells().length, getResult.rawCells().length);
+    for (int i = 0; i != scanResult.rawCells().length; ++i) {
+      Cell scanCell = scanResult.rawCells()[i];
+      Cell getCell = getResult.rawCells()[i];
+      assertEquals(0, Bytes.compareTo(CellUtil.cloneRow(scanCell), CellUtil.cloneRow(getCell)));
+      assertEquals(0, Bytes.compareTo(CellUtil.cloneFamily(scanCell), CellUtil.cloneFamily(getCell)));
+      assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(scanCell), CellUtil.cloneQualifier(getCell)));
+      assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(scanCell), CellUtil.cloneValue(getCell)));
     }
   }
 
@@ -5915,7 +5934,7 @@ public class TestFromClientSide {
   public void testReversedScanUnderMultiRegions() throws Exception {
     // Test Initialization.
     TableName TABLE = TableName.valueOf("testReversedScanUnderMultiRegions");
-    byte[] maxByteArray = ReversedClientScanner.MAX_BYTE_ARRAY;
+    byte[] maxByteArray = ConnectionUtils.MAX_BYTE_ARRAY;
     byte[][] splitRows = new byte[][] { Bytes.toBytes("005"),
         Bytes.add(Bytes.toBytes("005"), Bytes.multiple(maxByteArray, 16)),
         Bytes.toBytes("006"),

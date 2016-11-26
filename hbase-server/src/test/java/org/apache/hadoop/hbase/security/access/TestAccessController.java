@@ -816,27 +816,15 @@ public class TestAccessController extends SecureTestUtil {
   }
 
   @Test (timeout=180000)
-  public void testSplit() throws Exception {
-    AccessTestAction action = new AccessTestAction() {
-      @Override
-      public Object run() throws Exception {
-        ACCESS_CONTROLLER.preSplit(ObserverContext.createAndPrepare(RCP_ENV, null));
-        return null;
-      }
-    };
-
-    verifyAllowed(action, SUPERUSER, USER_ADMIN, USER_OWNER, USER_GROUP_ADMIN);
-    verifyDenied(action, USER_CREATE, USER_RW, USER_RO, USER_NONE, USER_GROUP_READ,
-      USER_GROUP_WRITE, USER_GROUP_CREATE);
-  }
-
-  @Test (timeout=180000)
   public void testSplitWithSplitRow() throws Exception {
+    final TableName tname = TableName.valueOf("testSplitWithSplitRow");
+    createTestTable(tname);
     AccessTestAction action = new AccessTestAction() {
       @Override
       public Object run() throws Exception {
-        ACCESS_CONTROLLER.preSplit(
-            ObserverContext.createAndPrepare(RCP_ENV, null),
+        ACCESS_CONTROLLER.preSplitRegion(
+            ObserverContext.createAndPrepare(CP_ENV, null),
+            tname,
             TEST_ROW);
         return null;
       }
@@ -2124,15 +2112,13 @@ public class TestAccessController extends SecureTestUtil {
       @Override
       public Object run() throws Exception {
         ACCESS_CONTROLLER.preCloneSnapshot(ObserverContext.createAndPrepare(CP_ENV, null),
-          snapshot, null);
+          snapshot, htd);
         return null;
       }
     };
-    // Clone by snapshot owner is not allowed , because clone operation creates a new table,
-    // which needs global admin permission.
-    verifyAllowed(cloneAction, SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN);
-    verifyDenied(cloneAction, USER_CREATE, USER_RW, USER_RO, USER_NONE, USER_OWNER,
-      USER_GROUP_READ, USER_GROUP_WRITE, USER_GROUP_CREATE);
+    verifyAllowed(cloneAction, SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN, USER_OWNER);
+    verifyDenied(cloneAction, USER_CREATE, USER_RW, USER_RO, USER_NONE, USER_GROUP_READ,
+      USER_GROUP_WRITE, USER_GROUP_CREATE);
   }
 
   @Test (timeout=180000)

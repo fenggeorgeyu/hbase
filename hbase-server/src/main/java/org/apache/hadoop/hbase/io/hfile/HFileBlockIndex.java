@@ -34,7 +34,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.hbase.ByteBufferedKeyOnlyKeyValue;
+import org.apache.hadoop.hbase.ByteBufferKeyOnlyKeyValue;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
@@ -426,7 +426,8 @@ public class HFileBlockIndex {
           ByteBuff b = midLeafBlock.getBufferWithoutHeader();
           int numDataBlocks = b.getIntAfterPosition(0);
           int keyRelOffset = b.getIntAfterPosition(Bytes.SIZEOF_INT * (midKeyEntry + 1));
-          int keyLen = b.getIntAfterPosition(Bytes.SIZEOF_INT * (midKeyEntry + 2)) - keyRelOffset;
+          int keyLen = b.getIntAfterPosition(Bytes.SIZEOF_INT * (midKeyEntry + 2)) - keyRelOffset
+              - SECONDARY_INDEX_ENTRY_OVERHEAD;
           int keyOffset =
               Bytes.SIZEOF_INT * (numDataBlocks + 2) + keyRelOffset
                   + SECONDARY_INDEX_ENTRY_OVERHEAD;
@@ -744,7 +745,7 @@ public class HFileBlockIndex {
       // If we imagine that keys[-1] = -Infinity and
       // keys[numEntries] = Infinity, then we are maintaining an invariant that
       // keys[low - 1] < key < keys[high + 1] while narrowing down the range.
-      ByteBufferedKeyOnlyKeyValue nonRootIndexkeyOnlyKV = new ByteBufferedKeyOnlyKeyValue();
+      ByteBufferKeyOnlyKeyValue nonRootIndexkeyOnlyKV = new ByteBufferKeyOnlyKeyValue();
       ObjectIntPair<ByteBuffer> pair = new ObjectIntPair<ByteBuffer>();
       while (low <= high) {
         mid = (low + high) >>> 1;

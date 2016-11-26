@@ -36,7 +36,6 @@ import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.HStore;
-import org.apache.hadoop.hbase.regionserver.MemStore;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.Store;
@@ -206,13 +205,6 @@ public class TestIOFencing {
       }
       super.completeCompaction(compactedFiles);
     }
-
-    @Override public void finalizeFlush() {
-    }
-
-    @Override public MemStore getMemStore() {
-      return null;
-    }
   }
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
@@ -249,7 +241,7 @@ public class TestIOFencing {
     // Insert our custom region
     c.setClass(HConstants.REGION_IMPL, regionClass, HRegion.class);
     // Encourage plenty of flushes
-    c.setLong("hbase.hregion.memstore.flush.size", 100000);
+    c.setLong("hbase.hregion.memstore.flush.size", 25000);
     c.set(HConstants.HBASE_REGION_SPLIT_POLICY_KEY, ConstantSizeRegionSplitPolicy.class.getName());
     // Only run compaction when we tell it to
     c.setInt("hbase.hstore.compaction.min",1);

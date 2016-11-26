@@ -53,7 +53,11 @@ function personality_globals
 
   # TODO use PATCH_BRANCH to select hadoop versions to use.
   # All supported Hadoop versions that we want to test the compilation with
-  HBASE_HADOOP_VERSIONS="2.4.0 2.4.1 2.5.0 2.5.1 2.5.2 2.6.1 2.6.2 2.6.3 2.7.1"
+  HBASE_MASTER_HADOOP2_VERSIONS="2.6.1 2.6.2 2.6.3 2.6.4 2.6.5 2.7.1 2.7.2 2.7.3"
+  HBASE_MASTER_HADOOP3_VERSIONS="3.0.0-alpha1"
+
+  HBASE_HADOOP2_VERSIONS="2.4.0 2.4.1 2.5.0 2.5.1 2.5.2 2.6.1 2.6.2 2.6.3 2.6.4 2.6.5 2.7.1 2.7.2 2.7.3"
+  HBASE_HADOOP3_VERSIONS=""
 
   # TODO use PATCH_BRANCH to select jdk versions to use.
 
@@ -180,6 +184,8 @@ function hadoopcheck_rebuild
   local logfile
   local count
   local result=0
+  local hbase_hadoop2_versions
+  local hbase_hadoop3_versions
 
   if [[ "${repostatus}" = branch ]]; then
     return 0
@@ -187,8 +193,16 @@ function hadoopcheck_rebuild
 
   big_console_header "Compiling against various Hadoop versions"
 
+  if [[ "${PATCH_BRANCH}" = "master" ]]; then
+    hbase_hadoop2_versions=${HBASE_MASTER_HADOOP2_VERSIONS}
+    hbase_hadoop3_versions=${HBASE_MASTER_HADOOP3_VERSIONS}
+  else
+    hbase_hadoop2_versions=${HBASE_HADOOP2_VERSIONS}
+    hbase_hadoop3_versions=${HBASE_HADOOP3_VERSIONS}
+  fi
+
   export MAVEN_OPTS="${MAVEN_OPTS}"
-  for hadoopver in ${HBASE_HADOOP_VERSIONS}; do
+  for hadoopver in ${hbase_hadoop2_versions}; do
     logfile="${PATCH_DIR}/patch-javac-${hadoopver}.txt"
     echo_and_redirect "${logfile}" \
       "${MAVEN}" clean install \
@@ -201,11 +215,29 @@ function hadoopcheck_rebuild
     fi
   done
 
+  for hadoopver in ${hbase_hadoop3_versions}; do
+    logfile="${PATCH_DIR}/patch-javac-${hadoopver}.txt"
+    echo_and_redirect "${logfile}" \
+      "${MAVEN}" clean install \
+        -DskipTests -DHBasePatchProcess \
+        -Dhadoop-three.version="${hadoopver} \
+        -Dhadoop.profile=3.0"
+    count=$(${GREP} -c ERROR "${logfile}")
+    if [[ ${count} -gt 0 ]]; then
+      add_vote_table -1 hadoopcheck "${BUILDMODEMSG} causes ${count} errors with Hadoop v${hadoopver}."
+      ((result=result+1))
+    fi
+  done
+
   if [[ ${result} -gt 0 ]]; then
     return 1
   fi
 
-  add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${HBASE_HADOOP_VERSIONS}."
+  if [[ -n "${hbase_hadoop3_versions}" ]]; then
+    add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${hbase_hadoop2_versions} or ${hbase_hadoop3_versions}."
+  else
+    add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${hbase_hadoop2_versions}."
+  fi
   return 0
 }
 
@@ -245,8 +277,7 @@ function hbaseprotoc_rebuild
     return 0
   fi
 
-  verify_needed_test hbaseprotoc
-  if [[ $? == 0 ]]; then
+  if ! verify_needed_test hbaseprotoc; then
     return 0
   fi
 
@@ -254,9 +285,11 @@ function hbaseprotoc_rebuild
 
   start_clock
 
-
   personality_modules patch hbaseprotoc
-  modules_workers patch hbaseprotoc compile -DskipTests -Pcompile-protobuf -X -DHBasePatchProcess
+  # Need to run 'install' instead of 'compile' because shading plugin
+  # is hooked-up to 'install'; else hbase-protocol-shaded is left with
+  # half of its process done.
+  modules_workers patch hbaseprotoc install -DskipTests -Pcompile-protobuf -X -DHBasePatchProcess
 
   # shellcheck disable=SC2153
   until [[ $i -eq "${#MODULE[@]}" ]]; do
@@ -317,8 +350,7 @@ function hbaseanti_patchfile
     return 0
   fi
 
-  verify_needed_test hbaseanti
-  if [[ $? == 0 ]]; then
+  if ! verify_needed_test hbaseanti; then
     return 0
   fi
 
